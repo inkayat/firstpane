@@ -20,7 +20,7 @@ Version **0.1.0** (`herdr-plugin.toml`). Source: [inkayat/firstpane](https://git
 
 ## Features
 
-- **Agents**: the agents Herdr detects in your session, grouped by project. Each row shows the title, status, changed-file count, harness icon, and the model and effort FirstMate recorded at launch. Search with `/` and filter by status with `f`. `g` focuses the agent's Herdr pane.
+- **Agents**: the agents Herdr detects in your session, grouped by project. Task clones that Git shows were made from the same project are listed under one heading. Each row shows the title, status, changed-file count, harness icon, and the model and effort FirstMate recorded at launch. Search with `/` and filter by status with `f`. `g` focuses the agent's Herdr pane.
 - **Changes**: the selected agent's worktree, one file at a time, with old and new line numbers. Stage and unstage files. A Git menu offers commit, fetch, fast-forward pull and push. Select diff lines to write a note to FirstMate about them.
 - **Pull Requests**: the PR for the selected agent's branch, or any open PR in your projects. It has Files, Comments and Checks views. You can post a GitHub comment and resolve review conversations. It uses your logged-in `gh` CLI.
 - **Board** (FirstMate only): a read-only view of FirstMate's task board, with TODO, Working, Waiting Review, Blocked and Done lanes. You cannot add, move or close tasks here.
@@ -101,7 +101,7 @@ The toggle opens Firstpane beside the focused pane without moving focus. It clos
 
 | Key | Action |
 | --- | --- |
-| `1`–`6` | The tabs shown in the tab row, numbered from 1 in their usual order (Agents, Changes, Browser, Pull Requests, Board, Settings). Hide tabs and the numbers close up: with only Agents and Settings shown, `1` is Agents and `2` is Settings. If Settings is hidden, `6` still opens it |
+| `1`–`6` | The tabs shown in the tab row, counted from 1 in their usual order (Agents, Changes, Browser, Pull Requests, Board, Settings). Hide tabs and the keys close up: with only Agents and Settings shown, `1` is Agents and `2` is Settings. If Settings is hidden, `6` still opens it |
 | `j` / `k` or arrows | Move through lists and diffs |
 | `Enter` | Select, open, or preview a message |
 | `m` | Write to FirstMate about the selected agent, lines, page or task |
@@ -117,7 +117,7 @@ Tab details:
 - **Pull Requests**: `p` lists open PRs. `Tab` switches between Files, Comments and Checks. `.` opens actions: open on GitHub, description, full diff, comment on GitHub, note to FirstMate. On a review conversation, `m` writes to FirstMate about it and `R` resolves it on GitHub. If a refresh fails, the last data stays on screen and says how old it is.
 - **Board**: `←` / `→` change lane, `↑` / `↓` change task, `Enter` shows details, `g` focuses the task's agent, `p` / `/` / `f` filter by project, search, and active tasks. A narrow pane shows one lane at a time.
 - **Browser**: opening the tab opens the selected agent's browser, or keeps it if it is already open. Only one agent's browser is open at a time. `x` closes it. `a` or `Ctrl-G` writes to FirstMate about the selected text on the page. The browser's select tool writes about the element you click. Inside Firstpane, the page fills the tab: `f`, `Enter` or a click on the page gives it the keyboard, and `Ctrl-O` gives it back to Firstpane. In a Ghostty tab, `f` or `Enter` brings that tab forward.
-- **Settings**: choose Ghostty tab or Inside Firstpane with `j` / `k` and `Enter`. An open browser moves the next time the Browser tab opens it. A Beside Firstpane choice saved by an earlier version becomes Inside Firstpane. A browser pane that version opened beside Firstpane is neither reused nor closed; close it in Herdr. Below that, every tab has a `[x]` / `[ ]` row; `Enter`, `Space` or a click shows or hides it. A hidden tab leaves the tab row and the tab numbers are counted again from 1 over the tabs left, in the tab row and on the number keys; its data, drafts and any browser it opened are kept, and showing it again brings it back as it was. Everything is shown until you hide it. Settings can be hidden too, but `6` then still opens it, so the other tabs can always be shown again. If every tab is hidden the tab row is empty and `6` is the way in. If the saved tab is hidden, Firstpane starts on the first shown tab, or on Settings when none is shown.
+- **Settings**: choose Ghostty tab or Inside Firstpane with `j` / `k` and `Enter`. An open browser moves the next time the Browser tab opens it. A Beside Firstpane choice saved by an earlier version becomes Inside Firstpane. A browser pane that version opened beside Firstpane is neither reused nor closed; close it in Herdr. Below that, every tab has a `[x]` / `[ ]` row; `Enter`, `Space` or a click shows or hides it. A hidden tab leaves the tab row and the number keys count again from 1 over the tabs left; its data, drafts and any browser it opened are kept, and showing it again brings it back as it was. Everything is shown until you hide it. Settings can be hidden too, but `6` then still opens it, so the other tabs can always be shown again. If every tab is hidden the tab row is empty and `6` is the way in. If the saved tab is hidden, Firstpane starts on the first shown tab, or on Settings when none is shown.
 
 ### FirstMate (optional)
 
