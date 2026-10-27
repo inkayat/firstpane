@@ -24,8 +24,8 @@ Version **0.1.0** (`herdr-plugin.toml`). Source: [inkayat/firstpane](https://git
 - **Changes**: the selected agent's worktree, one file at a time, with old and new line numbers. Stage and unstage files. A Git menu offers commit, fetch, fast-forward pull and push. Select diff lines to write a note to FirstMate about them.
 - **Pull Requests**: the PR for the selected agent's branch, or any open PR in your projects. It has Files, Comments and Checks views. You can post a GitHub comment and resolve review conversations. It uses your logged-in `gh` CLI.
 - **Board** (FirstMate only): a read-only view of FirstMate's task board, with TODO, Working, Waiting Review, Blocked and Done lanes. You cannot add, move or close tasks here.
-- **Browser**: opens a separate `terminal-browser` for the selected agent, either in a new Ghostty tab (macOS) or in a Herdr pane beside Firstpane. Each agent gets its own browser profile. Use the browser's select tool to write a note to FirstMate about part of a page.
-- **Settings**: where the browser opens. The choice is saved and kept across restarts.
+- **Browser**: the selected agent's own `terminal-browser`, either drawn inside Firstpane's Browser tab or opened in a new Ghostty tab (macOS). Each agent gets its own browser profile. Use the browser's select tool to write a note to FirstMate about part of a page.
+- **Settings**: where the browser opens (Ghostty tab or Inside Firstpane), and which tabs are shown. The choices are saved and kept across restarts.
 
 Every write needs a preview and `y`: Git operations, GitHub comments, resolving a conversation, and FirstMate messages. A click never performs one. Drafts are kept per agent.
 
@@ -101,7 +101,7 @@ The toggle opens Firstpane beside the focused pane without moving focus. It clos
 
 | Key | Action |
 | --- | --- |
-| `1`–`6` | Agents, Changes, Browser, Pull Requests, Board, Settings |
+| `1`–`6` | Agents, Changes, Browser, Pull Requests, Board, Settings. A tab hidden in Settings ignores its number, except `6`: Settings always opens |
 | `j` / `k` or arrows | Move through lists and diffs |
 | `Enter` | Select, open, or preview a message |
 | `m` | Write to FirstMate about the selected agent, lines, page or task |
@@ -116,8 +116,8 @@ Tab details:
 - **Changes**: `Tab` opens the file list and `[` / `]` move to the previous or next file. `w` picks the scope: all changes, workspace or staged. `s` / `u` stage or unstage the file. `g` opens the Git menu: commit staged (the message is written in your editor), fetch, pull (fast-forward only) and push (never forced). Select lines with a click, `Shift`+arrows or `v`, then press `Enter` to attach them to a FirstMate message.
 - **Pull Requests**: `p` lists open PRs. `Tab` switches between Files, Comments and Checks. `.` opens actions: open on GitHub, description, full diff, comment on GitHub, note to FirstMate. On a review conversation, `m` writes to FirstMate about it and `R` resolves it on GitHub. If a refresh fails, the last data stays on screen and says how old it is.
 - **Board**: `←` / `→` change lane, `↑` / `↓` change task, `Enter` shows details, `g` focuses the task's agent, `p` / `/` / `f` filter by project, search, and active tasks. A narrow pane shows one lane at a time.
-- **Browser**: opening the tab opens the selected agent's browser, or keeps it if it is already open. `f` or `Enter` brings it forward and `x` closes it. Only one agent's browser is open at a time. `a` or `Ctrl-G` writes to FirstMate about the selected text on the page. The browser's select tool writes about the element you click.
-- **Settings**: choose Ghostty tab or Beside Firstpane with `j` / `k` and `Enter`. An open browser moves the next time the Browser tab opens it.
+- **Browser**: opening the tab opens the selected agent's browser, or keeps it if it is already open. Only one agent's browser is open at a time. `x` closes it. `a` or `Ctrl-G` writes to FirstMate about the selected text on the page. The browser's select tool writes about the element you click. Inside Firstpane, the page fills the tab: `f`, `Enter` or a click on the page gives it the keyboard, and `Ctrl-O` gives it back to Firstpane. In a Ghostty tab, `f` or `Enter` brings that tab forward.
+- **Settings**: choose Ghostty tab or Inside Firstpane with `j` / `k` and `Enter`. An open browser moves the next time the Browser tab opens it. A Beside Firstpane choice saved by an earlier version becomes Inside Firstpane. A browser pane that version opened beside Firstpane is neither reused nor closed; close it in Herdr. Below that, every tab has a `[x]` / `[ ]` row; `Enter`, `Space` or a click shows or hides it. A hidden tab leaves the tab row and its number key does nothing; its data, drafts and any browser it opened are kept, and showing it again brings it back as it was. Everything is shown until you hide it. Settings can be hidden too, but `6` always opens it, so the other tabs can always be shown again. If every tab is hidden the tab row is empty and `6` is the way in. If the saved tab is hidden, Firstpane starts on the first shown tab, or on Settings when none is shown.
 
 ### FirstMate (optional)
 
@@ -158,8 +158,8 @@ Once FirstMate or a project scope is configured, agents outside that scope are h
 ## Known limitations
 
 - **Source distribution**: `v0.1.0` is the initial clean source tag, not a hosted release with binary assets. Actual installer activation/download/upgrade has not been exercised for this publication (see [Install](#install)). No project-wide license is present; third-party attribution and vendor mark conditions are retained in [`firstpane/icons/SOURCES.md`](firstpane/icons/SOURCES.md), not replaced by a new license or permission claim.
-- **Linux**: the Ghostty-tab browser is macOS-only, but it is the default placement on every OS. On Linux, choose **Beside Firstpane** in Settings (`6`) before using the Browser tab. The installer and the live pane have not been tested on Linux or Omarchy.
-- **Browser**: Firstpane does not draw web pages inside its Browser tab. Drawing them inside a Herdr pane was too slow, and that work is deferred, so the browser runs as a separate terminal-browser. Cookies and page state are lost when that browser closes; the profile and the last address are kept. A Ghostty tab opens only when Ghostty is the front app and has a window. Firstpane does not start or check development servers: agents using the same address reach the same server.
+- **Linux**: the Ghostty-tab browser is macOS-only, but it is the default placement on every OS. On Linux, choose **Inside Firstpane** in Settings (`6`) before using the Browser tab. The installer and the live pane have not been tested on Linux or Omarchy.
+- **Browser**: Inside Firstpane can be slow, and that is not fixed. Page frames reach the pane as kitty graphics through Herdr; sent inline, they update about twice a second. The tab says so when the terminal accepts neither shared-memory nor file frames, but Herdr can also fall back to inline images for its client on its own, which Firstpane cannot see. Inside Firstpane the browser belongs to Firstpane and closes with it. Cookies and page state are lost when a browser closes; the profile and the last address are kept. A Ghostty tab opens only when Ghostty is the front app and has a window. Firstpane does not start or check development servers: agents using the same address reach the same server.
 - **FirstMate messages**: only a pi FirstMate can receive them. A keystroke typed into FirstMate between Firstpane's last check and the paste can still land first. pi shows pastes longer than ten lines as `[paste #N +K lines]`.
 - **Board**: read-only, and it depends on `fm-board` sitting next to the `fm` launcher on `PATH`. Cards do not show PRs or checks.
 - **Agents**: model and effort are known only for agents launched by FirstMate. Icons need kitty graphics. The installer does not check for kitty graphics.

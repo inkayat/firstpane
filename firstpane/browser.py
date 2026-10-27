@@ -1,6 +1,5 @@
-"""The in-tab browser engine: the selected agent context's terminal-browser, drawn inside the
-Browser tab body. The Browser tab no longer opens it (it opens the browser where Settings says,
-firstpane/placed.py); the engine stays for the deferred in-tab repair.
+"""The in-tab browser: the selected agent context's terminal-browser, drawn inside the Browser
+tab body when Settings says Inside Firstpane (Ghostty tab opens it elsewhere: firstpane/placed.py).
 `Profiles` (contexts, profiles, remembered addresses, the browser's environment) is shared.
 
 A context is an agent identity together with its source worktree (`context`): it owns a
@@ -27,10 +26,10 @@ to FirstMate (`take_picks`, `answer_pick`).
 Leaving the Browser tab removes the placeholders and takes the keyboard from the page, but the
 browser is never told it is hidden: terminal-browser 0.13.4 drops the page's keyboard routing
 when its view is hidden and does not restore it when shown, so a page that had been hidden would
-ignore keys until clicked. Like the separate pane it replaces, the browser keeps running (and
-rendering an animated page) while the tab is not shown.
+ignore keys until clicked. The browser keeps running (and rendering an animated page) while the
+tab is not shown.
 
-Unlike the separate pane, the browser belongs to this Firstpane: closing Firstpane, switching to
+Unlike the Ghostty tab, the browser belongs to this Firstpane: closing Firstpane, switching to
 another context or `x` ends it (its own process group only); profiles and addresses stay.
 """
 
@@ -389,6 +388,8 @@ class Browser(Profiles):
             self._remember(self.shown, url)
 
     def close(self):
+        """End the shown browser; a start still waiting for the terminal's answer is dropped too."""
+        self.pending = None
         if not self.running:
             return "no browser to close"
         owner = self.shown

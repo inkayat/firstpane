@@ -2,7 +2,7 @@ id = "firstpane"
 name = "Firstpane"
 version = "0.1.0"
 min_herdr_version = "0.9.0"
-description = "Terminal pane workspace of agents by project: status, branch, changes and numbered diffs, guarded Git, a browser per agent in a Ghostty tab or beside Firstpane, open pull requests and inline messages to FirstMate about selected lines. Not a native Agents or Spaces sidebar."
+description = "Terminal pane workspace of agents by project: status, branch, changes and numbered diffs, guarded Git, a browser per agent inside Firstpane or in a Ghostty tab, open pull requests and inline messages to FirstMate about selected lines. Not a native Agents or Spaces sidebar."
 platforms = ["linux", "macos"]
 
 [[panes]]

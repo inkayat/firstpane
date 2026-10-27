@@ -1,17 +1,19 @@
 """Browser tab: each agent's own browser, opened where Settings says (a new tab in the front Ghostty
-window by default, or a Herdr pane beside Firstpane), driven through the App.
+window by default, or drawn inside Firstpane's Browser tab), driven through the App.
 
-Herdr is the session snapshot plus the FirstMate primary's pi message box (tests.support.FakePi)
-and, for Beside Firstpane, a fake pane split whose shell really runs the typed launcher. Ghostty
-is a fake `osascript` at the transport boundary whose `new tab in` the front window really runs its command
-through /bin/sh. Git runs for real against fixture worktrees, one per agent. terminal-browser is
-a fake that records how it was started, serves a registry entry pointing at a loopback fake CDP
-endpoint, keeps a helper child, and runs until it is told to stop. "The user types an address in
-the browser" is played by rewriting that registry tab and the fake page. "The user picks an
-element with the toolbar's select tool" is played by a `grab.json` the fake then sends the way
-terminal-browser 0.13.4's sendGrab does: to the agent bridge in its environment (POST
-/agent-text with the bearer token), else nowhere. No real browser, Ghostty window or tab, pane,
-profile, inbox or network is used.
+Herdr is the session snapshot plus the FirstMate primary's pi message box (tests.support.FakePi).
+Ghostty is a fake `osascript` at the transport boundary whose `new tab in` the front window really
+runs its command through /bin/sh. Git runs for real against fixture worktrees, one per agent.
+terminal-browser is a fake that records how it was started, serves a registry entry pointing at a
+loopback fake CDP endpoint, keeps a helper child, and runs until it is told to stop. Started
+inside Firstpane it also speaks the embed host protocol: it joins over PIXEL_EMBED, logs every
+host message, reports its placement and writes one shared-memory frame to PIXEL_TTY for each
+init or size message. The terminal's answers to Firstpane's frame queries are fed in as input
+bytes. "The user types an address in the browser" is played by rewriting that registry tab and
+the fake page. "The user picks an element with the toolbar's select tool" is played by a
+`grab.json` the fake then sends the way terminal-browser 0.13.4's sendGrab does: to the agent
+bridge in its environment (POST /agent-text with the bearer token), else nowhere. No real
+browser, Ghostty window or tab, pane, profile, inbox or network is used.
 """
 
 import json
@@ -28,11 +30,12 @@ from concurrent.futures import Future
 from pathlib import Path
 from unittest import mock
 
-from firstpane import placed
+from firstpane import browser, placed
 from firstpane.agents_view import humanize
 from firstpane.app import App
 from firstpane.config import Config
 from firstpane.embed import CaptureError
+from firstpane.frames import FILE_QUERY_ID, SHM_QUERY_ID
 from firstpane.kitty import PLACEHOLDER
 from firstpane.transport import LiveTransport
 from tests.gitfixture import GitFixture
@@ -40,8 +43,9 @@ from tests.support import (Clock, CmdResult, FakePi, FakeTerminal, FakeTransport
                            ghostty_argv, remove_launch_runtimes, selected_line, snapshot, workspace, write_meta)
 from tests.test_embed import FakeCdp
 
+FRAME = b"\x1b_Ga=T,f=32,t=s,s=4,v=4,i=%d,q=2,U=1,c=4,r=1;L3B4LTEtMC0x\x1b\\"
 FAKE_TB = r'''#!{python}
-import json, os, signal, subprocess, sys, time, urllib.error, urllib.request
+import json, os, signal, socket, subprocess, sys, threading, time, urllib.error, urllib.request
 home, runtime = os.environ["HOME"], os.environ["XDG_RUNTIME_DIR"]
 def log(name, item):
     with open(os.path.join(home, name), "a") as handle:
@@ -56,11 +60,31 @@ def stop(*_):
     helper.kill()
     os._exit(0)
 signal.signal(signal.SIGTERM, stop)
-log("launch.jsonl", {{"argv": sys.argv[1:], "env": dict(os.environ), "pid": os.getpid(), "helper": helper.pid}})
 url = sys.argv[2] if len(sys.argv) > 2 else "about:blank"
 registry = {{"browsers": [{{"key": "fake-1", "pid": os.getpid(), "cdpPort": {port},
              "tabs": [{{"id": 1, "url": url, "active": True, "targetId": "PAGE1"}}]}}]}}
 open(os.path.join(runtime, "registry.json"), "w").write(json.dumps(registry))
+# Logged last: tests wait for this line and then read the registry.
+log("launch.jsonl", {{"argv": sys.argv[1:], "env": dict(os.environ), "pid": os.getpid(), "helper": helper.pid}})
+def embed_host():
+    # The embed client: join Firstpane's socket, then place the page and write one frame to the
+    # pty for the init and for every size change.
+    host = socket.socket(socket.AF_UNIX)
+    host.connect(os.environ["PIXEL_EMBED"])
+    host.sendall(json.dumps({{"type": "join", "pane": "p", "name": "fake", "pid": os.getpid()}}).encode() + b"\n")
+    tty = os.open(os.environ["PIXEL_TTY"], os.O_WRONLY)
+    image = None
+    for line in host.makefile("rb"):
+        message = json.loads(line)
+        log("host.jsonl", message)
+        if message["type"] == "init":
+            image = message["imageId"]
+        if message["type"] in ("init", "size"):
+            host.sendall(json.dumps({{"type": "placed", "imageId": image, "cols": message["cols"],
+                                     "rows": message["rows"]}}).encode() + b"\n")
+            os.write(tty, {frame!r} % image)
+if os.environ.get("PIXEL_EMBED"):
+    threading.Thread(target=embed_host, daemon=True).start()
 def grab_send(pick):
     # 0.13.4 sendGrab: the agent bridge first (POST <bridge>/agent-text, bearer token);
     # without one (or refused) nothing reaches an agent, the pick is only copied.
@@ -91,6 +115,8 @@ while True:
 '''
 URL_A = "http://127.0.0.1:8001/"
 URL_B = "http://127.0.0.1:8002/"
+SHM_OK = f"\x1b_Gi={SHM_QUERY_ID};OK\x1b\\".encode()
+NOTHING_ACCEPTED = f"\x1b_Gi={SHM_QUERY_ID};EINVAL:bad\x1b\\\x1b_Gi={FILE_QUERY_ID};EINVAL:bad\x1b\\".encode()
 
 
 def plain(frame):
@@ -110,9 +136,9 @@ def alive(pid):
 
 
 class Transport(FakeTransport):
-    """Fake Herdr snapshot, inbox, pane split and Ghostty; real git. Nothing else runs."""
+    """Fake Herdr snapshot, inbox and Ghostty; real git. Nothing else runs."""
 
-    def __init__(self, own_tab):
+    def __init__(self):
         super().__init__()
         self.live = LiveTransport(None)
         self.inbox = []
@@ -120,44 +146,12 @@ class Transport(FakeTransport):
         self.focused = []
         self.closed = []
         self.procs = []
-        self.shell_pids = {}
-        self.own_tab = own_tab
-        self.next_pane = 2
-        self.socket_handlers.update({
-            "pane.split": self.split, "pane.send_input": self.send_input,
-            "pane.process_info": self.process_info, "pane.close": self.close_pane,
-        })
 
     def spawn(self, command, cwd, argv=None):
         proc = subprocess.Popen(argv or ["/bin/sh", "-c", command], cwd=cwd, start_new_session=True,
                                 env={"PATH": "/usr/bin:/bin", "HOME": "/personal/home", "TERM_PROGRAM": "ghostty"})
         self.procs.append(proc)
         return proc
-
-    def split(self, params):
-        pane_id = f"w1:p{self.next_pane}"
-        self.next_pane += 1
-        row = {"pane_id": pane_id, "terminal_id": f"term_{pane_id}", "tab_id": self.own_tab["tab_id"],
-               "workspace_id": self.own_tab["workspace_id"]}
-        self.pane_get[pane_id] = row
-        return {"id": "t", "result": {"type": "pane_info", "pane": dict(row)}}
-
-    def send_input(self, params):
-        self.shell_pids[params["pane_id"]] = self.spawn(params["text"], None).pid
-        return {"id": "t", "result": {"type": "ok"}}
-
-    def process_info(self, params):
-        if params["pane_id"] not in self.pane_get:
-            return {"id": "t", "error": {"code": "pane_not_found"}}
-        return {"id": "t", "result": {"type": "pane_process_info", "process_info": {
-            "pane_id": params["pane_id"], "shell_pid": self.shell_pids.get(params["pane_id"]), "foreground_processes": []}}}
-
-    def close_pane(self, params):
-        self.pane_get.pop(params["pane_id"], None)
-        pid = self.shell_pids.pop(params["pane_id"], None)
-        if pid:
-            os.killpg(pid, signal.SIGTERM)
-        return {"id": "t", "result": {"type": "ok"}}
 
     def run(self, argv, stdin=None, env=None, timeout=None, cwd=None, detach=False):
         if argv and str(argv[0]).endswith("fm-inbox.sh"):
@@ -195,9 +189,10 @@ class BrowserTabTests(unittest.TestCase):
     def setUp(self):
         # The real capture runs subprocesses; the production 3s bound lets a loaded runner
         # time out and silently lose the remembered address.
-        patcher = mock.patch.object(placed, "TIMEOUT", 60)
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        for module, name in ((placed, "TIMEOUT"), (browser, "CAPTURE_TIMEOUT")):
+            patcher = mock.patch.object(module, name, 60)
+            patcher.start()
+            self.addCleanup(patcher.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
@@ -212,7 +207,7 @@ class BrowserTabTests(unittest.TestCase):
         self.tb = self.root / "tb"
         (self.tb / "bin").mkdir(parents=True)
         script = self.tb / "bin" / "terminal-browser"
-        script.write_text(FAKE_TB.format(python=sys.executable, port=self.cdp.port))
+        script.write_text(FAKE_TB.format(python=sys.executable, port=self.cdp.port, frame=FRAME))
         script.chmod(0o755)
         (self.tb / "VERSION").write_text("v9.9.9\n")
         self.home = self.root / "home"
@@ -232,21 +227,19 @@ class BrowserTabTests(unittest.TestCase):
         )
         (self.root / "tool" / "bin").mkdir(parents=True)
         (self.root / "tool" / "bin" / "fm-inbox.sh").write_text("#!/bin/sh\n")
-        own = {"pane_id": "w1:p1", "terminal_id": "term_fp", "tab_id": "w1:t1", "workspace_id": "w1"}
-        self.transport = Transport(own)
-        self.transport.pane_get["w1:p1"] = own
+        self.transport = Transport()
         self.addCleanup(self.transport.stop)
         self.addCleanup(remove_launch_runtimes, self.root)
         rows = list(self.agent_panes.values())
         self.transport.snapshot = snapshot([workspace("w2", "alpha"), workspace("w3", "beta", number=2)], rows,
                                            [agent_for(row) for row in rows])
         self.main = FakePi(self.transport, self.home)
-        pi_info = self.transport.socket_handlers["pane.process_info"]
-        self.transport.socket_handlers["pane.process_info"] = lambda params: (
-            self.transport.process_info(params) if params["pane_id"] in self.transport.shell_pids else pi_info(params))
+        self.pane_bytes = b""
         self.app = self.make_app(self.config)
 
     def tearDown(self):
+        self.app.browser.shutdown(wait=1)
+        self.app.frames.cleanup()
         self.app.placed.release()
 
     def write_meta(self, task, worktree):
@@ -288,14 +281,21 @@ class BrowserTabTests(unittest.TestCase):
             self.app.render()
             fds = self.app.io_fds()
             ready, _, _ = select.select(fds, [], [], 0.05) if fds else ([], [], [])
-            self.app.pump(ready, time.monotonic())
+            self.pane_bytes += self.app.pump(ready, time.monotonic())
             if until():
                 return
             if not fds:
                 time.sleep(0.02)
         raise AssertionError(f"timed out; frame:\n{self.frame()}")
 
+    def negotiate(self, answer=SHM_OK):
+        """Firstpane asks its terminal at start; the terminal answers in the input stream."""
+        self.app.terminal_queries()
+        self.app.handle_bytes(answer)
+
     def spec_env(self):
+        if self.app.browser.running:
+            return self.app.browser.child_env_used
         return json.loads(Path(self.app.placed.record["spec"]).read_text())["env"]
 
     def profile_home(self):
@@ -310,8 +310,19 @@ class BrowserTabTests(unittest.TestCase):
     def launch(self, home=None):
         return [entry for entry in self.logged("launch.jsonl", home) if "argv" in entry][-1]
 
+    def host(self):
+        """What Firstpane told the browser inside it, in order."""
+        return self.logged("host.jsonl")
+
+    def page_keys(self):
+        return [message.get("text") or message["key"] for message in self.host() if message["type"] == "key"]
+
     def running(self):
-        return self.app.placed.state == "open" and bool(self.logged("launch.jsonl"))
+        if self.app.browser_placement == "embedded":
+            shown = self.app.browser.grid is not None
+        else:
+            shown = self.app.placed.state == "open"
+        return shown and bool(self.logged("launch.jsonl"))
 
     def open_tab(self, task, url=None):
         """Select `task`, choose the Browser tab and wait until its browser runs; then go to
@@ -329,9 +340,20 @@ class BrowserTabTests(unittest.TestCase):
         registry.write_text(json.dumps(data))
         self.page.update(url=url, href=url)
 
-    def choose_beside(self):
-        for key in ("6", "j", "enter"):
+    def choose(self, *keys):
+        """Settings (6): j/k to a placement, Enter chooses it."""
+        for key in ("6", *keys, "enter"):
             self.app.handle_key(key)
+
+    def choose_inside(self):
+        self.choose("j")
+
+    def choose_ghostty(self):
+        self.choose("k")
+
+    def image_rows(self):
+        lines = self.app.render().split("\n")
+        return [index + 1 for index, line in enumerate(lines) if PLACEHOLDER in line]
 
     def capture(self, key="a"):
         self.app.handle_key(key)
@@ -390,28 +412,123 @@ class BrowserTabTests(unittest.TestCase):
         self.assertFalse([name for name in launch["env"] if name.startswith(("HERDR_", "PIXEL_"))])
         self.assertNotEqual(launch["env"]["HOME"], os.environ.get("HOME"))
 
-    def test_with_beside_chosen_the_browser_tab_splits_a_pane_beside_firstpane_and_never_asks_ghostty(self):
-        # Break: the saved placement is ignored (a Ghostty tab opens anyway), or the pane
-        # lands somewhere other than right of this Firstpane without taking focus.
-        self.choose_beside()
+    def test_with_inside_chosen_the_browser_tab_draws_the_agents_page_in_its_body(self):
+        # Break: Inside Firstpane still opens a Ghostty tab or a Herdr pane, the page is not drawn
+        # in the tab body (or covers only part of it), frames go inline although the terminal
+        # takes shared memory, or the browser inherits HERDR_* and the personal HOME.
+        self.negotiate()
+        self.choose_inside()
         self.open_tab("alpha-task")
-        split = [call["params"] for call in self.transport.socket_calls if call["method"] == "pane.split"]
-        self.assertEqual(len(split), 1)
-        self.assertEqual((split[0]["target_pane_id"], split[0]["direction"], split[0]["focus"]), ("w1:p1", "right", False))
         self.assertEqual(self.transport.osascript, [])
-        self.assertIn("beside Firstpane", self.frame())
+        self.assertFalse([call for call in self.transport.socket_calls if call["method"] == "pane.split"])
+        init = self.host()[0]
+        self.assertEqual((init["type"], init["transport"]), ("init", "shm"))
+        self.pump(lambda: FRAME % init["imageId"] in self.pane_bytes)
+        rows = self.image_rows()
+        self.assertEqual(rows, list(range(rows[0], 31)))
+        self.assertEqual(self.app.render().split("\n")[rows[0] - 1].count(PLACEHOLDER), 109)
+        launch = self.launch()
+        self.assertEqual(launch["pid"], self.app.browser.child.pid)
+        self.assertFalse([name for name in launch["env"] if name.startswith("HERDR_")])
+        self.assertNotEqual(launch["env"]["HOME"], os.environ.get("HOME"))
+
+    def test_a_long_message_above_the_page_inside_firstpane_takes_one_row(self):
+        # Break: a status that wraps takes several rows from the page, so each message resizes
+        # the page image (Herdr's fast image path is lost when the image changes size mid-frame).
+        self.negotiate()
+        self.choose_inside()
+        self.open_tab("alpha-task")
+        self.pump(lambda: self.image_rows()[-1] == 30)
+        top = self.image_rows()[0]
+        self.app.status = "a refusal that is much longer than the pane is wide " * 5
+        self.pump(lambda: self.app.browser.grid["rows"] == 30 - top)
+        self.assertEqual(self.image_rows(), list(range(top + 1, 31)))
 
     def test_a_placement_change_moves_the_open_browser_on_the_next_open_without_a_second_instance(self):
-        # Break: after choosing Beside the Ghostty tab keeps running next to the new pane
-        # (two browsers on one profile), or the new placement is never used.
-        self.open_tab("alpha-task")
+        # Break: after choosing Inside Firstpane the Ghostty tab keeps running next to the page in
+        # the tab (two browsers on one profile), going back leaves the in-tab browser running,
+        # the new placement is never used, or the moved browser opens at the address the agent
+        # had before the one it was just at.
+        self.negotiate()
+        self.open_tab("alpha-task", URL_A)
         first = self.launch()
-        self.choose_beside()
+        self.choose_inside()
         self.app.handle_key("3")
-        self.pump(lambda: self.app.placed.state == "open" and self.app.placed.record["placement"] == "beside")
+        self.pump(self.running)
         self.assertFalse(alive(first["pid"]))
         self.assertFalse(alive(first["helper"]))
-        self.assertEqual(len(self.transport.windows()), 1)
+        self.assertEqual(self.transport.closed, ["GT-1"])
+        inside = self.launch()
+        self.assertEqual(inside["argv"], ["open", URL_A])
+        self.navigate(URL_B)
+        self.choose_ghostty()
+        self.app.handle_key("3")
+        self.pump(lambda: self.running() and self.launch()["pid"] != inside["pid"])
+        self.assertFalse(alive(inside["pid"]))
+        self.assertFalse(alive(inside["helper"]))
+        self.assertEqual(self.image_rows(), [])
+        self.assertEqual(len(self.transport.windows()), 2)
+        self.assertEqual(self.launch()["argv"], ["open", URL_B])
+
+    def test_inside_firstpane_f_gives_the_page_the_keys_until_ctrl_o(self):
+        # Break: `f` asks Ghostty for a tab instead, keys meant for the page are taken as
+        # Firstpane shortcuts (3 switches tabs, x closes the browser), or Ctrl-O keeps them.
+        self.negotiate()
+        self.choose_inside()
+        self.open_tab("alpha-task")
+        self.app.handle_key("f")
+        self.assertEqual(self.app.focus, "browser")
+        for key in ("x", "3"):
+            self.app.handle_key(key)
+        self.pump(lambda: self.page_keys() == ["x", "3"])
+        self.assertTrue(self.app.browser.running)
+        self.app.handle_key("ctrl-o")
+        self.assertEqual(self.app.focus, "list")
+        self.assertEqual(self.transport.osascript, [])
+
+    def test_a_browser_still_waiting_for_the_terminal_does_not_start_once_ghostty_tab_is_chosen(self):
+        # Break: the in-tab browser, still waiting for the terminal's frame answer, starts later
+        # next to the Ghostty tab the user switched to (two browsers on one profile).
+        self.app.terminal_queries()
+        self.choose_inside()
+        self.select("alpha-task")
+        self.app.handle_key("3")
+        self.choose_ghostty()
+        self.app.handle_key("3")
+        self.pump(self.running)
+        self.app.handle_bytes(SHM_OK)
+        self.pump(lambda: True, timeout=0.5)
+        self.assertIsNone(self.app.browser.child)
+        self.assertEqual(len(self.logged("launch.jsonl")), 1)
+
+    def test_a_terminal_without_fast_frames_gets_the_page_inline_and_says_it_is_slow(self):
+        # Break: the in-tab browser starts before the terminal answered, or a terminal that takes
+        # neither shared memory nor files gets inline frames silently, as if they were as fast.
+        self.app.terminal_queries()
+        self.choose_inside()
+        self.select("alpha-task")
+        self.app.handle_key("3")
+        self.assertIsNone(self.app.browser.child)
+        self.assertIn("checking how frames reach this terminal", self.frame())
+        self.app.handle_bytes(NOTHING_ACCEPTED)
+        self.pump(self.running)
+        self.assertEqual(self.host()[0]["transport"], "inline")
+        self.assertIn("inline frames: slow", self.frame())
+
+    def test_x_closes_the_browser_inside_firstpane_and_its_address_reopens(self):
+        # Break: `x` leaves the in-tab browser (or its page image) behind, or the next open
+        # starts blank.
+        self.negotiate()
+        self.choose_inside()
+        self.open_tab("alpha-task", URL_A)
+        pid = self.launch()["pid"]
+        self.app.handle_key("x")
+        self.assertIn("closed (profile kept)", self.frame())
+        self.assertFalse(alive(pid))
+        self.assertEqual(self.image_rows(), [])
+        self.app.handle_key("3")
+        self.pump(lambda: self.running() and self.launch()["pid"] != pid)
+        self.assertEqual(self.launch()["argv"], ["open", URL_A])
 
     def test_choosing_the_browser_tab_again_keeps_the_running_browser_and_its_page(self):
         # Break: a second click on the tab (or `3` again) opens another window or restarts the
@@ -426,6 +543,48 @@ class BrowserTabTests(unittest.TestCase):
         self.assertEqual(self.launch()["pid"], pid)
         self.assertEqual(len(self.logged("launch.jsonl")), 1)
         self.assertEqual(len(self.transport.windows()), 1)
+
+    def test_hiding_the_browser_tab_in_settings_leaves_the_running_browser_and_its_page(self):
+        # Break: hiding the tab in Settings ends the agent's browser (or opens a second one
+        # later), losing the page the user is on.
+        self.open_tab("alpha-task")
+        pid = self.launch()["pid"]
+        self.app.handle_key("6")
+        row = next(i for i, line in enumerate(self.frame().splitlines(), 1) if "[x] Browser" in line)
+        self.app.handle_mouse(0, self.frame().splitlines()[row - 1].index("[x]") + 1, row)
+        self.assertNotIn("Browser", self.frame().splitlines()[0])
+        self.app.handle_key("3")
+        self.assertEqual(self.app.tab, "settings")
+        self.pump(lambda: True, timeout=0.5)
+        self.assertTrue(alive(pid))
+        self.assertEqual(self.app.placed.state, "open")
+        row = next(i for i, line in enumerate(self.frame().splitlines(), 1) if "[ ] Browser" in line)
+        self.app.handle_mouse(0, self.frame().splitlines()[row - 1].index("[ ]") + 1, row)
+        self.app.handle_key("3")
+        self.pump(lambda: True, timeout=0.5)
+        self.assertEqual(self.launch()["pid"], pid)
+        self.assertEqual(len(self.logged("launch.jsonl")), 1)
+
+    def test_hiding_the_browser_tab_keeps_the_browser_inside_firstpane_and_its_page(self):
+        # Break: hiding the tab ends the in-tab browser Firstpane owns (or starts a second one
+        # when it is shown again), so the page the user was on is lost.
+        self.negotiate()
+        self.choose_inside()
+        self.open_tab("alpha-task")
+        pid = self.launch()["pid"]
+        self.app.handle_key("6")
+        row = next(i for i, line in enumerate(self.frame().splitlines(), 1) if "[x] Browser" in line)
+        self.app.handle_mouse(0, self.frame().splitlines()[row - 1].index("[x]") + 1, row)
+        self.app.handle_key("3")
+        self.pump(lambda: True, timeout=0.5)
+        self.assertEqual((self.app.tab, self.app.browser.child.pid), ("settings", pid))
+        self.assertEqual(self.image_rows(), [])
+        row = next(i for i, line in enumerate(self.frame().splitlines(), 1) if "[ ] Browser" in line)
+        self.app.handle_mouse(0, self.frame().splitlines()[row - 1].index("[ ]") + 1, row)
+        self.app.handle_key("3")
+        self.pump(lambda: bool(self.image_rows()))
+        self.assertEqual(self.app.browser.child.pid, pid)
+        self.assertEqual(len(self.logged("launch.jsonl")), 1)
 
     def test_f_brings_the_shown_agents_window_forward(self):
         # Break: `f` focuses another Ghostty terminal, or does nothing.
@@ -594,13 +753,27 @@ class BrowserTabTests(unittest.TestCase):
         self.assertIn('[<p id="line1">FPBM alpha</p> selector: #line1]', body)
         self.assertIn(self.URL, body)
 
-    def test_the_select_tool_works_the_same_from_a_browser_beside_firstpane(self):
-        # Break: only the native window gets the agent bridge, so picks made in the pane beside
-        # Firstpane go nowhere.
-        self.choose_beside()
+    def test_the_select_tool_works_the_same_from_the_browser_inside_firstpane(self):
+        # Break: only the Ghostty tab's browser gets the agent bridge, so picks made on the page
+        # inside Firstpane go nowhere, or the message loses the page they were made on.
+        self.negotiate()
+        self.choose_inside()
         self.open_tab("alpha-task")
-        self.assertEqual(self.pick('[<h1>Beside</h1> selector: h1]'), 200)
-        self.assertEqual(self.app.draft["anchor"]["element"], "[<h1>Beside</h1> selector: h1]")
+        self.assertEqual(self.pick('[<h1>Inside</h1> selector: h1]'), 200)
+        self.assertEqual((self.app.draft["anchor"]["element"], self.app.draft["anchor"]["url"]),
+                         ("[<h1>Inside</h1> selector: h1]", self.URL))
+
+    def test_capture_reads_the_page_of_the_browser_inside_firstpane(self):
+        # Break: `a` on the page inside Firstpane is refused as "no open browser" (only the
+        # Ghostty tab's browser is read), or another browser's page is read.
+        self.negotiate()
+        self.choose_inside()
+        self.open_tab("alpha-task")
+        self.capture()
+        anchor = self.app.draft["anchor"]
+        self.assertEqual((anchor["url"], anchor["title"], anchor["selection"]),
+                         (self.URL, "Fixture Title", "marked text\nsecond"))
+        self.assertEqual(self.app.focus, "composer")
 
     def test_a_tooltip_note_is_previewed_with_the_element_and_not_retyped(self):
         # Break: the typed tooltip note is dropped, the element or page is missing, a second
@@ -737,7 +910,7 @@ class BrowserTabTests(unittest.TestCase):
         self.app.handle_key("esc")
         self.assertIsNone(self.app.draft)
         self.assertNotIn("keep this", self.frame())
-        self.choose_beside()
+        self.choose_inside()
         self.select("beta-task")
         self.app.handle_key("3")
         self.app.handle_key("m")

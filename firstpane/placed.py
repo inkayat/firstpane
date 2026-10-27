@@ -1,6 +1,6 @@
-"""The Browser tab's browser outside the tab, where Settings says: a new tab in the Ghostty window
-in front (`ghostty`, the default) or a Herdr pane beside Firstpane (`beside`, the placement before
-the browser was drawn inside the tab). One agent context's browser at a time.
+"""The Browser tab's browser outside Firstpane, when Settings says Ghostty tab: a new tab in the
+Ghostty window in front (Inside Firstpane draws it in the tab instead: firstpane/browser.py). One
+agent context's browser at a time.
 
 Contexts, private profiles, remembered addresses and the same-address warning are the in-tab
 browser's (browser.Profiles), so an address remembered there is reopened here. Each launch
@@ -13,7 +13,7 @@ reaches a shell is one fixed command,
 which records its pid for the launch's nonce and replaces itself with `terminal-browser open
 [<url>]` in that environment.
 
-ghostty: one `osascript` call asks Ghostty (1.3+, macOS) for a new tab, running the command, in
+One `osascript` call asks Ghostty (1.3+, macOS) for a new tab, running the command, in
 the window that is Ghostty's front window at that moment. Firstpane cannot ask Ghostty which window
 it runs in (Ghostty's AppleScript ties no window to a tty, process or Herdr pane), so this is the
 window in front when the tab is chosen, normally the one its keys are typed in; it depends on
@@ -31,16 +31,12 @@ configured terminal-browser. Focus and close use only the terminal id Ghostty re
 tab; close ends the launched process and the processes it started, then closes that terminal,
 which takes its tab with it: never the host window or another tab.
 
-beside: Herdr splits Firstpane's own pane to the right (focus stays here) and `exec` plus the
-command is typed into the new pane's shell. The pane is this Firstpane's browser only while it
-re-proves:
-same pane, terminal, tab and workspace as when split, and a shell pid equal to the launched pid.
-A Herdr that cannot be reached keeps the record and refuses every action.
-
-The record (`companion.json`, the name the beside-only Firstpane used, whose records still load)
-outlives Firstpane, so a restarted Firstpane reuses a browser that re-proves instead of opening
-another; that browser's select tool then reaches no Firstpane until it is reopened. Closing
-Firstpane does not close the browser. Profiles and launch records stay after it closes.
+The record (`companion.json`, the name the first Firstpane used for its browser pane) outlives
+Firstpane, so a restarted Firstpane reuses a browser that re-proves instead of opening another;
+that browser's select tool then reaches no Firstpane until it is reopened. A record of a browser
+pane beside Firstpane (that placement is gone) is not taken for a Ghostty tab: the pane is left
+as it is. Closing Firstpane does not close the browser. Profiles and launch records stay after it
+closes.
 """
 
 import json
@@ -60,10 +56,6 @@ from firstpane.embed import AgentBridge, CaptureError
 from firstpane.sanitize import sanitize
 
 LAUNCHER = Path(__file__).resolve().parent / "browser_launch.py"
-PLACEMENTS = ("ghostty", "beside")
-DEFAULT_PLACEMENT = "ghostty"
-PLACEMENT_LABELS = {"ghostty": "Ghostty tab", "beside": "Beside Firstpane"}
-SOCKET_ERRORS = (TimeoutError, OSError, ConnectionError, ValueError)
 TIMEOUT = 3
 START_TIMEOUT = 20
 OSASCRIPT_TIMEOUT = 10
@@ -137,10 +129,9 @@ class PlacedBrowser(Profiles):
     # only a caller that created its own window (a native proof) sets it.
     ghostty_window = ""
 
-    def __init__(self, root, base_dir, own_pane_id, transport, env=None, clock=time.time, python=sys.executable,
+    def __init__(self, root, base_dir, transport, env=None, clock=time.time, python=sys.executable,
                  platform=sys.platform):
         super().__init__(root, base_dir, env, clock)
-        self.own_pane_id = own_pane_id
         self.transport = transport
         self.python = python
         self.platform = platform
@@ -152,14 +143,6 @@ class PlacedBrowser(Profiles):
         self._load()
 
     # ---- record ----------------------------------------------------------------------
-    @property
-    def pane_id(self):
-        return self.record.get("pane_id") if self.record else None
-
-    @property
-    def placement(self):
-        return self.record["placement"] if self.record else None
-
     def _record_path(self):
         return self.base / "companion.json"
 
@@ -167,10 +150,8 @@ class PlacedBrowser(Profiles):
         data = self._read(self._record_path())
         if not data or data.get("closed"):
             return
-        data.setdefault("placement", "beside")  # written by the beside-only Firstpane
-        if data["placement"] == "beside" and not isinstance(data.get("pane_id"), str):
-            return
-        if data["placement"] not in PLACEMENTS or not isinstance(data.get("spec"), str):
+        # A browser pane beside Firstpane ("beside", or no placement from the first Firstpane).
+        if data.get("placement") != "ghostty" or not isinstance(data.get("spec"), str):
             return
         self.record = data
         self.state = "starting"
@@ -213,8 +194,6 @@ class PlacedBrowser(Profiles):
         return self.record is not None and self.record.get("context") == context["id"]
 
     def where(self):
-        if self.placement == "beside":
-            return f"pane {self.pane_id} beside Firstpane"
         return "a Ghostty tab"
 
     def describe(self):
@@ -232,33 +211,11 @@ class PlacedBrowser(Profiles):
         if self.state == "failed":
             return f"{who(self.owner())}'s browser did not start in {self.where()}" if self.record else (
                 f"did not start ({self.reason})" if self.reason else "did not start")
-        if self.state == "unreachable":
-            return f"browser in {self.where()} is unverified (Herdr unreachable)"
         if self.state == "closed":
             return f"no browser open ({self.reason})" if self.reason else "no browser open"
         return "no browser open"
 
     # ---- proof -----------------------------------------------------------------------
-    def _request(self, method, params):
-        """(answer, result): answer is "ok", "missing" (Herdr says there is no such pane) or
-        "unreachable" (no usable answer: timeout, connect error, unreadable or unexpected reply)."""
-        try:
-            response = self.transport.socket_call(method, params, TIMEOUT)
-        except SOCKET_ERRORS:
-            return "unreachable", None
-        if not isinstance(response, dict):
-            return "unreachable", None
-        error = response.get("error")
-        if error:
-            code = error.get("code") if isinstance(error, dict) else None
-            return ("missing" if code == "pane_not_found" else "unreachable"), None
-        result = response.get("result")
-        return ("ok", result) if isinstance(result, dict) else ("unreachable", None)
-
-    def _call(self, method, params):
-        answer, result = self._request(method, params)
-        return result if answer == "ok" else None
-
     def _launched(self):
         try:
             data = json.loads((Path(self.record["spec"]).parent / "launched.json").read_text())
@@ -280,38 +237,15 @@ class PlacedBrowser(Profiles):
 
     def _prove(self):
         """None when the recorded browser is still exactly ours, else why it is not ("starting"
-        and "unreachable" are not verdicts: the record is kept)."""
-        if self.placement == "ghostty":
-            pid = self._launched()
-            if pid is None:
-                return "starting"
-            running = self._runs_browser(pid)
-            if running is None:
-                return "starting"
-            if not running:
-                return "browser window closed"
-            self.record["pid"] = pid
-            return None
-        answer, result = self._request("pane.get", {"pane_id": self.record["pane_id"]})
-        if answer == "missing":
-            return "pane closed"
-        pane = result.get("pane") if result else None
-        if not isinstance(pane, dict):
-            return "unreachable"
-        for name in ("terminal_id", "tab_id", "workspace_id"):
-            if pane.get(name) != self.record.get(name):
-                return "pane replaced" if name == "terminal_id" else "pane moved"
+        is not a verdict: the record is kept)."""
         pid = self._launched()
         if pid is None:
             return "starting"
-        answer, result = self._request("pane.process_info", {"pane_id": self.record["pane_id"]})
-        if answer == "missing":
-            return "pane closed"
-        info = result.get("process_info") if result else None
-        if not isinstance(info, dict):
-            return "unreachable"
-        if info.get("shell_pid") != pid:
-            return "pane no longer runs the launched browser"
+        running = self._runs_browser(pid)
+        if running is None:
+            return "starting"
+        if not running:
+            return "browser window closed"
         self.record["pid"] = pid
         return None
 
@@ -323,8 +257,6 @@ class PlacedBrowser(Profiles):
         reason = self._prove()
         if reason is None:
             self.state = "open"
-        elif reason == "unreachable":
-            self.state = "unreachable"
         elif reason == "starting":
             started = self.record.get("created_at") or 0
             self.state = "starting" if self.clock() - started < START_TIMEOUT else "failed"
@@ -332,19 +264,9 @@ class PlacedBrowser(Profiles):
             self._forget(reason, ended=reason == "browser window closed")
 
     # ---- actions ---------------------------------------------------------------------
-    def _unsupported(self, placement):
-        if placement == "ghostty" and self.platform != "darwin":
-            return "Ghostty tab needs macOS (Ghostty's AppleScript); choose Beside Firstpane in Settings (6)"
-        if placement == "beside" and not self.own_pane_id:
-            return ("browser refused: Firstpane does not know its own Herdr pane (HERDR_PANE_ID); "
-                    "choose Ghostty tab in Settings (6)")
-        if placement not in PLACEMENTS:
-            return f"browser refused: unknown placement {placement!r}"
-        return ""
-
-    def _unverified(self, action):
-        if self.state == "unreachable":
-            return f"browser in {self.where()} is unverified (Herdr unreachable); {action} refused"
+    def _unsupported(self):
+        if self.platform != "darwin":
+            return "Ghostty tab needs macOS (Ghostty's AppleScript); choose Inside Firstpane in Settings (6)"
         return ""
 
     def _other(self, context, action):
@@ -352,19 +274,16 @@ class PlacedBrowser(Profiles):
             return ""
         return f"{action} refused: {self.where()} shows {who(self.owner())}'s browser, not {who(context)}'s"
 
-    def open(self, context, placement):
-        """Show `context`'s browser in `placement`: the one already there (re-proven), else a new
-        one at the context's remembered address, or blank. A browser of another context or
-        placement is ended first (only once it re-proves); every profile stays."""
-        refusal = self.unconfigured() or self._unsupported(placement)
+    def open(self, context):
+        """Show `context`'s browser in a Ghostty tab: the one already there (re-proven), else a
+        new one at the context's remembered address, or blank. A browser of another context is
+        ended first (only once it re-proves); every profile stays."""
+        refusal = self.unconfigured() or self._unsupported()
         if refusal:
             return refusal
         self.refresh()
-        refusal = self._unverified("open")
-        if refusal:
-            return refusal
         if self.record is not None:
-            same = self._shows(context) and self.placement == placement
+            same = self._shows(context)
             if self.state == "starting":
                 if same:
                     return f"{who(context)}'s browser is still starting in {self.where()}"
@@ -375,14 +294,7 @@ class PlacedBrowser(Profiles):
             refusal, _ = self._end(f"replaced by {who(context)}'s browser")
             if refusal:
                 return f"{refusal}; {who(context)}'s browser not opened"
-        if placement == "ghostty":
-            return self._open_ghostty(context)
-        return self._open_beside(context)
-
-    def _new_record(self, placement, context, spec, url):
-        return {"placement": placement, "spec": str(spec["path"]), "nonce": spec["nonce"], "url": url,
-                "created_at": self.clock(), "context": context["id"], "identity": context["identity"],
-                "label": context["label"], "source": context["source"]}
+        return self._open_ghostty(context)
 
     def _command(self, spec):
         return " ".join(shlex.quote(part) for part in (self.python, "-I", "-B", str(LAUNCHER), str(spec["path"])))
@@ -393,7 +305,9 @@ class PlacedBrowser(Profiles):
         spec = self._write_spec(url, profile)
         # Written before Ghostty is asked: whatever osascript answers, a tab it opened is
         # found by its launcher's pid instead of being asked for again.
-        self.record = dict(self._new_record("ghostty", context, spec, url), terminal=None)
+        self.record = {"placement": "ghostty", "spec": str(spec["path"]), "nonce": spec["nonce"], "url": url,
+                       "created_at": self.clock(), "context": context["id"], "identity": context["identity"],
+                       "label": context["label"], "source": context["source"], "terminal": None}
         self._save()
         self.state = "starting"
         result = self.transport.run(["osascript", "-e", NEW_TAB, self._command(spec), str(profile),
@@ -402,7 +316,7 @@ class PlacedBrowser(Profiles):
         if result.code == 127 and not result.timed_out:
             self._forget("osascript did not run")
             self.state = "failed"
-            return "Ghostty tab unavailable: osascript did not run; choose Beside Firstpane in Settings (6)"
+            return "Ghostty tab unavailable: osascript did not run; choose Inside Firstpane in Settings (6)"
         answer = (result.stdout or "").strip()
         if result.code == 0 and answer.startswith("refused:"):
             # Checked before anything was created: no tab exists, nothing to wait for.
@@ -410,7 +324,7 @@ class PlacedBrowser(Profiles):
             self._forget(why)
             self.state = "failed"
             return (f"Ghostty tab not opened: {why}. It opens in the Ghostty window in front: bring "
-                    "Firstpane's Ghostty window forward and choose the tab again, or choose Beside Firstpane "
+                    "Firstpane's Ghostty window forward and choose the tab again, or choose Inside Firstpane "
                     "in Settings (6)")
         ids = answer.splitlines()
         if result.code != 0 or result.timed_out or len(ids) != 3 or not all(ids):
@@ -424,47 +338,9 @@ class PlacedBrowser(Profiles):
         self._save()
         return f"opening {who(context)}'s browser in a Ghostty tab"
 
-    def _open_beside(self, context):
-        own = self._call("pane.get", {"pane_id": self.own_pane_id})
-        own = own.get("pane") if own else None
-        if not isinstance(own, dict):
-            return "browser refused: this Firstpane pane is not visible to Herdr"
-        url = _page_address(context["url"])
-        profile = self._context_dir(context["id"])
-        spec = self._write_spec(url, profile)
-        result = self._call("pane.split", {"target_pane_id": self.own_pane_id, "direction": "right",
-                                           "focus": False, "cwd": str(profile)})
-        pane = result.get("pane") if result else None
-        if not isinstance(pane, dict) or not isinstance(pane.get("pane_id"), str):
-            self.release()
-            return "browser pane not created: Herdr refused the split"
-        if pane.get("tab_id") != own.get("tab_id") or pane.get("workspace_id") != own.get("workspace_id"):
-            # The response naming a pane does not prove that pane is ours: record it, touch nothing.
-            evidence = Path(spec["path"]).parent / "refused-split.json"
-            evidence.write_text(json.dumps({"own": own, "pane": pane, "at": self.clock()}))
-            self.release()
-            return (f"browser refused: Herdr reported the new pane {pane['pane_id']} outside this tab; "
-                    "nothing was sent to it or closed")
-        self.record = dict(self._new_record("beside", context, spec, url), pane_id=pane["pane_id"],
-                           terminal_id=pane.get("terminal_id"), tab_id=pane.get("tab_id"),
-                           workspace_id=pane.get("workspace_id"))
-        self._save()
-        self.state = "starting"
-        if self._call("pane.send_input", {"pane_id": pane["pane_id"], "text": "exec " + self._command(spec),
-                                          "keys": ["enter"]}) is None:
-            return f"browser pane {pane['pane_id']} created, but the launch was not accepted; x closes it"
-        return f"opening {who(context)}'s browser in pane {pane['pane_id']} beside Firstpane"
-
     def _end(self, reason):
         """Close the recorded browser (its address kept first) and forget it: (refusal or "",
         whether a Ghostty tab of it is left open for the user to close)."""
-        if self.placement == "beside":
-            pane_id = self.pane_id
-            self._keep_address()
-            if self._call("pane.close", {"pane_id": pane_id}) is None:
-                return f"browser pane {pane_id} not closed", False
-            self._forget(reason, ended=True)
-            return "", False
         if self.state == "open":
             self._keep_address()
             if not self._stop(self.record["pid"]):
@@ -516,15 +392,11 @@ class PlacedBrowser(Profiles):
         self.refresh()
         if self.record is None:
             return "no browser open; the Browser tab (3) opens one"
-        refusal = self._unverified("focus") or self._other(context, "focus")
+        refusal = self._other(context, "focus")
         if refusal:
             return refusal
         if self.state != "open":
             return f"{who(context)}'s browser is still starting in {self.where()}"
-        if self.placement == "beside":
-            if self._call("pane.focus", {"pane_id": self.pane_id}) is None:
-                return f"browser pane {self.pane_id} not focused"
-            return f"focused browser pane {self.pane_id}"
         terminal = self.record.get("terminal")
         if not terminal:
             return "cannot bring the Ghostty tab forward: Ghostty did not name it; it is still open there"
@@ -537,10 +409,7 @@ class PlacedBrowser(Profiles):
         self.refresh()
         if self.record is None:
             return "no browser open to close"
-        refusal = self._unverified("close")
-        if refusal:
-            return refusal
-        if self.state == "starting" and self.placement == "ghostty":
+        if self.state == "starting":
             return f"busy: {who(self.owner())}'s browser is still starting in {self.where()}; x again once it runs"
         where, owner = self.where(), self.owner()
         refusal, window_left = self._end("closed from Firstpane")
