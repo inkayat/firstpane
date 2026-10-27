@@ -4,10 +4,14 @@ FirstMate can give a task its own clone of a project under the FirstMate home's 
 agent's worktree checked out from that clone) instead of `projects/<name>`. Such a report is listed
 when its binding is live and unique and its worktree is a checkout of that clone; everything else
 under `data/`, another home's clones, stale or doubly claimed bindings, and explicit
-`project_root` / `project_allowlist` scopes stay as they were. Herdr is faked at the socket
-boundary; Git runs for real.
+`project_root` / `project_allowlist` scopes stay as they were. A clone Git proves was made from a
+listed project (its origin, or with no origin its recorded clone source) is listed under that
+project; every other clone stays its own group. Herdr is faked at the socket boundary; Git runs
+for real.
 """
 
+import re
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -18,7 +22,9 @@ from firstpane.app import App
 from firstpane.config import Config
 from firstpane.transport import LiveTransport
 from tests.gitfixture import git_env
-from tests.support import Clock, FakeTerminal, FakeTransport, agent_for, pane, snapshot, strip_sgr, workspace, write_meta
+from tests.support import Clock, FakePi, FakeTerminal, FakeTransport, agent_for, pane, selected_line, snapshot, strip_sgr, workspace, write_meta
+
+HEADER = re.compile(r"[\u25be\u25b8] (\S+)\s+(\d+) agents?\s*$")
 
 
 class GitTransport(FakeTransport):
@@ -180,6 +186,137 @@ class PrivateSourceTests(unittest.TestCase):
         app.handle_key("4")
         queried = {call["argv"][2] for call in self.transport.calls if call["argv"][1:2] == ["-C"] and "remote" in call["argv"]}
         return app, (strip_sgr(app.render()), queried)
+
+    # ---- clones of a listed project -----------------------------------------------------
+    def clone(self, source, pool, origin=None, name=None):
+        """`git clone` of `source` to `<home>/data/<pool>/source/<name>` with its origin removed
+        (or set to `origin`), and a worktree of it, as FirstMate makes a task's own copy."""
+        path = self.home / "data" / pool / "source" / (name or Path(source).name)
+        path.parent.mkdir(parents=True)
+        self.git(self.root, "clone", "-q", str(source), str(path))
+        if origin:
+            self.git(path, "remote", "set-url", "origin", origin)
+        else:
+            self.git(path, "remote", "remove", "origin")
+        return path, self.worktree(path, self.home / "data" / pool / "pool" / "wt", f"fm/{pool}")
+
+    def headers(self, text):
+        """(label, agent count) of each project heading on the Agents tab, top to bottom."""
+        return [(match.group(1), int(match.group(2))) for line in text.splitlines() if (match := HEADER.search(line))]
+
+    def listed_under(self, app, task):
+        """(heading key, the row's own project_key) of the task's agent row."""
+        return next((project["key"], row["project_key"]) for project in app.projects
+                    for row in project["agents"] if row.get("task_id") == task)
+
+    def test_reports_in_clones_of_a_listed_project_are_listed_under_it_and_keep_their_own_source(self):
+        # Break (the user's case): each task-private clone of one project is its own heading
+        # (`alpha/source/<hash>`), a clone of a clone is not traced back, a clone made from the
+        # project's GitHub origin is not matched by that origin, or grouping rewrites the rows'
+        # own source (their workspace and Git actions are checked against it).
+        self.report("alpha-task", self.alpha, self.worktree(self.alpha, self.root / "alpha-wt", "fm/alpha-task"), number=1)
+        one, one_wt = self.clone(self.alpha, "one-pool")
+        two, two_wt = self.clone(one, "two-pool")
+        self.report("alpha-one", one, one_wt, number=2)
+        self.report("alpha-two", two, two_wt, number=3)
+        beta = self.repo(self.home / "projects" / "beta")
+        self.git(beta, "remote", "add", "origin", "https://github.com/acme/beta.git")
+        hosted = self.root / "hosted" / "beta.git"
+        self.git(self.root, "clone", "-q", "--bare", str(beta), str(hosted))
+        three, three_wt = self.clone(hosted, "three-pool", origin="https://github.com/acme/beta.git", name="beta")
+        self.report("beta-one", three, three_wt, number=4)
+        app, text = self.listed()
+        self.assertEqual(self.headers(text), [("alpha", 3), ("beta", 1)], text)
+        self.assertNotIn("/source", text)
+        self.assertEqual(self.listed_under(app, "alpha-one"), (str(self.alpha), str(one)))
+        self.assertEqual(self.listed_under(app, "alpha-two"), (str(self.alpha), str(two)))
+        self.assertEqual(self.listed_under(app, "beta-one"), (str(beta), str(three)))
+
+    def test_a_clone_git_does_not_prove_was_made_from_the_listed_project_stays_its_own_project(self):
+        # Break: a same-named clone is grouped by its name, by shared history alone (a clone whose
+        # origin is now another repository), or by a guess when its origin is not a repository URL,
+        # Git keeps no clone record, or the clone it was made from is gone.
+        self.git(self.alpha, "remote", "add", "origin", "https://github.com/acme/alpha.git")
+        self.report("alpha-task", self.alpha, self.worktree(self.alpha, self.root / "alpha-wt", "fm/alpha-task"), number=1)
+        other, other_wt = self.private(self.home, "other-pool", "fm/other", name="alpha")
+        self.git(other, "remote", "add", "origin", "https://github.com/other/alpha.git")
+        fork, fork_wt = self.clone(self.alpha, "fork-pool", origin="https://github.com/fork/alpha.git")
+        odd, odd_wt = self.clone(self.alpha, "odd-pool", origin="not a repository")
+        bare, bare_wt = self.clone(self.alpha, "bare-pool")
+        shutil.rmtree(bare / ".git" / "logs")
+        gone, _ = self.clone(self.alpha, "gone-pool")
+        orphan, orphan_wt = self.clone(gone, "orphan-pool")
+        shutil.rmtree(gone)
+        cases = {"other-task": (other, other_wt), "fork-task": (fork, fork_wt), "odd-task": (odd, odd_wt),
+                 "bare-task": (bare, bare_wt), "orphan-task": (orphan, orphan_wt)}
+        for number, (task, (source, wt)) in enumerate(cases.items(), start=2):
+            self.report(task, source, wt, number=number)
+        app, text = self.listed()
+        self.assertEqual(self.headers(text)[0], ("alpha", 1), text)
+        self.assertEqual(len(self.headers(text)), 6, text)
+        for task, (source, _) in cases.items():
+            self.assertEqual(self.listed_under(app, task), (str(source), str(source)), task)
+
+    def test_an_origin_two_listed_projects_share_does_not_choose_one_of_them(self):
+        # Break: a clone whose origin matches more than one listed project joins the first.
+        for path in (self.alpha, self.repo(self.home / "projects" / "alpha-mirror")):
+            self.git(path, "remote", "add", "origin", "https://github.com/acme/alpha.git")
+        self.report("alpha-task", self.alpha, self.worktree(self.alpha, self.root / "alpha-wt", "fm/alpha-task"), number=1)
+        one, one_wt = self.clone(self.alpha, "one-pool", origin="https://github.com/acme/alpha.git")
+        self.report("alpha-one", one, one_wt, number=2)
+        app, _ = self.listed()
+        self.assertEqual(self.listed_under(app, "alpha-one"), (str(one), str(one)))
+
+    def test_selection_fold_search_and_message_keep_the_exact_clone_agent_after_grouping(self):
+        # Break: grouping sends the message with the listed project's path or another agent's
+        # pane/workspace, unfolding the project restores an agent other than the one last
+        # selected, or a selected clone agent hidden by a search falls to the first project
+        # instead of its own heading.
+        self.report("alpha-zed", self.alpha, self.worktree(self.alpha, self.root / "alpha-wt", "fm/alpha-zed"), number=1)
+        one, one_wt = self.clone(self.alpha, "one-pool")
+        two, two_wt = self.clone(one, "two-pool")
+        self.report("alpha-one", one, one_wt, number=2)
+        self.report("alpha-two", two, two_wt, number=3)
+        beta = self.repo(self.home / "projects" / "beta")
+        self.report("beta-zed", beta, self.worktree(beta, self.root / "beta-wt", "fm/beta-zed"), number=4)
+        three, three_wt = self.clone(beta, "three-pool")
+        self.report("beta-one", three, three_wt, number=6)
+        main = FakePi(self.transport, self.home)
+        self.rows.append(main.pane)
+        app, _ = self.listed()
+
+        def go(task):
+            for _ in range(20):
+                app.handle_key("k")
+            for _ in range(20):
+                if humanize(task) in selected_line(app.render()):
+                    return
+                app.handle_key("j")
+            raise AssertionError(strip_sgr(app.render()))
+
+        go("alpha-two")
+        app.handle_key("enter")
+        app.handle_key("m")
+        app.handle_bytes("kontrol et".encode())
+        app.handle_key("enter")
+        app.handle_key("y")
+        body = main.received[-1]
+        self.assertIn(f"project: alpha  {two}\n", body)
+        self.assertIn("agent: alpha-two  alpha-two-agent  pane w3:p1  terminal term_alpha-two\n", body)
+        self.assertIn(f"workspace: {two_wt}  (fm)\n", body)
+        app.handle_key("esc")
+        go("alpha-one")
+        app.handle_key("k")  # to the heading: alpha-one, a clone's agent, was selected last
+        self.assertIn("alpha", selected_line(app.render()))
+        app.handle_key("enter")
+        self.assertNotIn(humanize("alpha-one"), strip_sgr(app.render()))
+        app.handle_key("enter")
+        self.assertIn(humanize("alpha-one"), selected_line(app.render()))
+        go("beta-one")
+        app.handle_key("/")
+        app.handle_bytes("zed".encode())
+        self.assertIn("beta", selected_line(app.render()))
+        self.assertNotIn(humanize("beta-one"), strip_sgr(app.render()))
 
 
 if __name__ == "__main__":

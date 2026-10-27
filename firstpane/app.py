@@ -24,7 +24,7 @@ from firstpane.composer_view import ComposerMixin, note_outcome
 from firstpane.drafts import DraftStore
 from firstpane.frames import FrameMedium
 from firstpane.fmmeta import display_labels, load_metas
-from firstpane.gitremote import choose_remote
+from firstpane.gitremote import choose_remote, parse_git_remote_url
 from firstpane.icons import NO_GRAPHICS, HarnessIcons
 from firstpane.input import InputDecoder
 from firstpane.lineedit import LineEdit
@@ -123,6 +123,7 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
         self.detail_text = ""
         self.logins = {}
         self._common_cache = {}
+        self._git_cache = {}
         self._fetches = {}
         self.decoder = InputDecoder()
         self.tab = "agents"
@@ -563,15 +564,14 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
     def _tab_row(self, plain):
         count = self._changed_count()
         visible = self._visible_tabs()
-        narrow = self.cols < 60 or sum(len(TAB_LABELS[name]) + 4 for name in visible) + 4 > self.cols
+        narrow = self.cols < 60 or sum(len(TAB_LABELS[name]) + 2 for name in visible) + 4 > self.cols
         parts = []
         spans = []
         column = 1
-        for number, name in enumerate(visible, start=1):
+        for name in visible:
             label = TAB_LABELS[name] if name == self.tab or not narrow else TAB_SHORT[name]
             if name == "changes" and count is not None:
                 label += ("" if label == TAB_SHORT[name] else " ") + str(count)
-            label = f"{number} {label}"
             shown = "1;4;" + rgb_fg(INK) if name == self.tab else rgb_fg(MUTED)
             parts.append(paint(label, shown, plain))
             spans.append((column, column + len(label), name))
@@ -793,15 +793,23 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
             if row["key"] == cursor:
                 return index
         if cursor and len(cursor) > 1:
-            project_key = cursor[1]
+            project_key = self._group_of(cursor)
             for index, row in enumerate(rows):
                 if row.get("project_key") == project_key:
                     return index
         return 0
 
+    def _group_of(self, key):
+        """The project an agent row is listed under (a clone's agents sit under the project it was
+        made from); the key's own project when no listed agent has that key."""
+        for project in self.projects:
+            if any(row["key"] == key for row in project["agents"]):
+                return project["key"]
+        return key[1]
+
     def _remember(self, row):
         if row["kind"] == "agent" and row.get("project_key"):
-            self.last_agent[row["project_key"]] = row["key"]
+            self.last_agent[self._group_of(row["key"])] = row["key"]
 
     def _activate(self, row):
         if row["kind"] == "project":
@@ -993,6 +1001,14 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
         # A private clone is listed on Agents only; it neither joins Pull Requests nor changes how
         # the projects there are labelled.
         agents_only = private - shared
+        # A private clone Git proves was made from a listed project is listed under it. Its rows
+        # keep the clone as project_key: their workspace, Git actions and messages use that.
+        listed = [key for key in groups if key not in agents_only]
+        for key in sorted(agents_only):
+            source = self._clone_project(key, listed)
+            if source:
+                groups[source]["agents"].extend(groups.pop(key)["agents"])
+        agents_only = {key for key in agents_only if key in groups}
         label_of = display_labels([key for key in groups if key not in agents_only])
         every = display_labels(list(groups))
         label_of.update({key: every[key] for key in agents_only})
@@ -1166,6 +1182,50 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
             common = os.path.realpath((result.stdout or "").strip())
         self._common_cache[cwd] = (common, now)
         return common
+
+    def _git_text(self, path, *args):
+        """Stripped stdout of `git -C path args`, or None when Git fails (retried later)."""
+        now = self.clock()
+        cached = self._git_cache.get((path, args))
+        if cached and (cached[0] is not None or now - cached[1] < GIT_RETRY):
+            return cached[0]
+        result = self.transport.run(["git", "-C", path, *args], timeout=GIT_TIMEOUT, cwd=str(self.state_dir))
+        text = (result.stdout or "").strip() if result.code == 0 else None
+        self._git_cache[(path, args)] = (text, now)
+        return text
+
+    def _clone_source(self, path):
+        """Where Git says the repository at `path` came from: its origin URL, else (no origin)
+        what its first HEAD reflog entry, `clone: from <source>`, names. None when unknown."""
+        origin = self._git_text(path, "config", "--default", "", "--get", "remote.origin.url")
+        if origin is None or origin:
+            return origin
+        log = self._git_text(path, "reflog", "show", "--format=%gs", "HEAD")
+        first = (log or "").splitlines()[-1:] or [""]
+        return first[0].removeprefix("clone: from ") if first[0].startswith("clone: from ") else None
+
+    def _clone_project(self, path, listed, depth=4):
+        """The listed project the clone at `path` was made from, or None. A local source is
+        matched by its Git common dir (a clone of another of this home's clones is followed); a
+        URL only when exactly one listed project has that origin. A name or shared history alone
+        proves nothing."""
+        source = self._clone_source(path)
+        if not source or depth == 0:
+            return None
+        if source.startswith("/"):
+            common = self._common_dir(source)
+            key = _canonical(common) if common else None
+            if key in listed:
+                return key
+            if key and key != path and path_in_scope(key, str(Path(self.config.firstmate_home) / "data")):
+                return self._clone_project(key, listed, depth - 1)
+            return None
+        remote = parse_git_remote_url(source)
+        if not remote:
+            return None
+        matches = [key for key in listed if parse_git_remote_url(self._git_text(
+            key, "config", "--default", "", "--get", f"remote.{self.config.remotes.get(key, 'origin')}.url")) == remote]
+        return matches[0] if len(matches) == 1 else None
 
     def _checkout_from_common(self, common, cwd):
         path = Path(common)

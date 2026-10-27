@@ -261,40 +261,41 @@ class TabVisibilityTests(PanelFixture):
         self.assertNotIn("Bd", self.tab_row(app))
         self.assertTrue(all(len(line) <= 44 for line in self.lines(app)))
 
-    # ---- numbers follow what is shown --------------------------------------------------
+    # ---- the number keys follow what is shown; the captions carry no numbers ---------
     NAMES = ("agents", "changes", "browser", "prs", "board", "settings")
     LABEL = dict(zip(NAMES, LABELS))
-    NUMBERED = re.compile(r"(\d) (Agents|Changes|Browser|Pull Requests|Board|Settings)")
 
-    def numbered(self, app):
-        return [(int(number), label) for number, label in self.NUMBERED.findall(self.tab_row(app))]
+    def captions(self, app):
+        """The tab row's captions, left to right."""
+        return [part.strip() for part in self.tab_row(app).split("  ") if part.strip()]
 
     def save_hidden(self, hidden):
         self.state.mkdir(parents=True, exist_ok=True)
         (self.state / "ui-state.json").write_text(json.dumps({"hidden_tabs": list(hidden)}))
 
-    def test_every_combination_of_hidden_tabs_numbers_what_is_shown_from_one_and_the_keys_agree(self):
-        # Break: a number is still the tab's fixed position (Settings stays 6, a hidden tab leaves
-        # a gap), the row and the number keys disagree, or a number past the shown tabs opens one.
-        # Key 6 is the single extra way back to a hidden Settings.
+    def test_every_combination_of_hidden_tabs_shows_plain_captions_and_numbers_the_keys_from_one(self):
+        # Break: a caption shows its number again ("1 Agents"), a key is still the tab's fixed
+        # position (Settings stays 6, a hidden tab leaves a gap), or a number past the shown tabs
+        # opens one. Key 6 is the single extra way back to a hidden Settings.
         for mask in range(64):
             hidden = [name for bit, name in enumerate(self.NAMES) if mask >> bit & 1]
             shown = [name for name in self.NAMES if name not in hidden]
             self.save_hidden(hidden)
             app = self.app()
-            self.assertEqual(self.numbered(app), [(n, self.LABEL[name]) for n, name in enumerate(shown, start=1)], hidden)
+            self.assertEqual(self.captions(app), [self.LABEL[name] for name in shown], hidden)
             for number, name in enumerate(shown, start=1):
                 app.handle_key(str(number))
                 self.assertEqual(app.tab, name, (hidden, number))
+                self.assertEqual(self.captions(app), [self.LABEL[name] for name in shown], (hidden, number))
             for number in range(len(shown) + 1, 7):
                 before = app.tab
                 app.handle_key(str(number))
                 recovered = number == 6 and "settings" in hidden
                 self.assertEqual(app.tab, "settings" if recovered else before, (hidden, number))
 
-    def test_with_only_agents_and_settings_shown_they_are_one_and_two(self):
-        # Break: Settings keeps its fixed 6 (or leaves a gap) when the tabs between are hidden, so
-        # the number on screen is not the key that works.
+    def test_with_only_agents_and_settings_shown_the_keys_are_one_and_two(self):
+        # Break: Settings keeps its fixed 6 (or leaves a gap) when the tabs between are hidden,
+        # or the row shows numbers before the captions.
         self.save_hidden(["changes", "browser", "prs", "board"])
         app = self.app()
         app.handle_key("2")
@@ -303,15 +304,15 @@ class TabVisibilityTests(PanelFixture):
         self.assertEqual(app.tab, "agents")
         app.handle_key("6")
         self.assertEqual(app.tab, "agents")
-        self.assertEqual(self.tab_row(app).split(), ["1", "Agents", "2", "Settings"])
+        self.assertEqual(self.tab_row(app).split(), ["Agents", "Settings"])
 
-    def test_hiding_and_showing_a_tab_renumbers_the_row_and_the_keys_at_once_and_after_a_restart(self):
-        # Break: the labels or the keys keep the old numbers until a restart, or the saved state
-        # stores numbers (it must keep tab names, so showing a tab again restores its place).
+    def test_hiding_and_showing_a_tab_moves_the_keys_at_once_and_after_a_restart(self):
+        # Break: the keys keep the old positions until a restart, or the saved state stores
+        # numbers (it must keep tab names, so showing a tab again restores its place).
         app = self.app()
         app.handle_key("6")
         self.toggle(app, "Changes")
-        self.assertEqual(self.numbered(app), [(1, "Agents"), (2, "Browser"), (3, "Pull Requests"), (4, "Board"), (5, "Settings")])
+        self.assertEqual(self.captions(app), ["Agents", "Browser", "Pull Requests", "Board", "Settings"])
         app.handle_key("5")
         self.assertEqual(app.tab, "settings")
         app.handle_key("1")
@@ -319,30 +320,39 @@ class TabVisibilityTests(PanelFixture):
         self.assertEqual(app.tab, "board")
         self.assertEqual(self.saved()["hidden_tabs"], ["changes"])
         again = self.app()
-        self.assertEqual(self.numbered(again), [(1, "Agents"), (2, "Browser"), (3, "Pull Requests"), (4, "Board"), (5, "Settings")])
+        self.assertEqual(self.captions(again), ["Agents", "Browser", "Pull Requests", "Board", "Settings"])
         again.handle_key("5")
         self.assertEqual(again.tab, "settings")
         self.toggle(again, "Changes")
-        self.assertEqual(self.numbered(again)[1], (2, "Changes"))
+        self.assertEqual(self.captions(again)[1], "Changes")
         again.handle_key("2")
         self.assertEqual(again.tab, "changes")
 
-    def test_a_narrow_pane_keeps_the_numbers_on_the_short_labels(self):
-        # Break: the short labels a narrow pane uses lose their numbers or keep the fixed ones.
+    def test_a_narrow_pane_shows_plain_short_labels_with_the_same_keys(self):
+        # Break: the short labels a narrow pane uses carry numbers, or the keys there keep the
+        # fixed positions.
         self.save_hidden(["changes"])
         app = self.app(rows=20, cols=44)
-        self.assertEqual(self.tab_row(app).split(), ["1", "Agents", "2", "Br", "3", "PR", "4", "Bd", "5", "Set"])
+        self.assertEqual(self.tab_row(app).split(), ["Agents", "Br", "PR", "Bd", "Set"])
         app.handle_key("5")
         self.assertEqual(app.tab, "settings")
+        self.assertEqual(self.tab_row(app).split(), ["Ag", "Br", "PR", "Bd", "Settings"])
 
-    def test_clicking_a_numbered_tab_label_opens_it(self):
-        # Break: the click targets do not cover the number the label now starts with.
+    def test_a_click_on_each_cell_of_a_caption_opens_that_tab_and_the_gap_opens_none(self):
+        # Break: the click targets still cover a removed number (a click on the gap before a
+        # caption opens it, or the caption's last cell opens the next tab).
         self.save_hidden(["changes", "browser"])
         app = self.app()
-        self.click_text(app, "2 Pull Requests")
-        self.assertEqual(app.tab, "prs")
-        self.click_text(app, "4 Settings")
-        self.assertEqual(app.tab, "settings")
+        row = self.tab_row(app)
+        for label, name in (("Pull Requests", "prs"), ("Settings", "settings"), ("Agents", "agents")):
+            start = row.index(label)
+            for col in (start, start + len(label) - 1):
+                app.handle_key("1" if name != "agents" else "2")
+                self.click(app, 1, col=col + 1)
+                self.assertEqual(app.tab, name, (label, col))
+            app.handle_key("3")
+            self.click(app, 1, col=start)
+            self.assertEqual(app.tab, "board", (label, "gap"))
 
 
 if __name__ == "__main__":

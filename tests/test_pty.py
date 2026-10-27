@@ -403,7 +403,7 @@ class PtyTests(unittest.TestCase):
         term.wait_for(lambda s: "Pty task" in s.text())
         term.send(b"5")  # Board is hidden: Settings is the fifth shown tab, no longer the sixth
         term.wait_for(lambda s: "[ ] Board" in s.text())
-        self.assertEqual(term.screen.lines()[0].split()[-2:], ["5", "Settings"])
+        self.assertEqual(term.screen.lines()[0].split()[-1:], ["Settings"])
         term.send(b"\x03")
         self.assertEqual(term.exit_code(), 0)
         again = self.open()
@@ -444,17 +444,18 @@ class PtyTests(unittest.TestCase):
         again.wait_for(lambda s: "Browser placement" in s.text())
         self.assertNotIn("Settings", again.screen.lines()[0])
 
-    def test_the_numbers_on_the_tab_row_are_the_keys_that_work_for_every_visibility_state(self):
-        # Break: on the real entrypoint the row and the number keys disagree after tabs are hidden
-        # (Settings keeps 6, a gap is left, a key opens the tab that used to have that number), a
-        # restart brings the old numbers back, or a hidden Settings has no way back.
+    def test_the_number_keys_open_the_shown_tabs_in_order_and_the_row_shows_no_numbers(self):
+        # Break: on the real entrypoint the tab row shows numbers again, the number keys disagree
+        # with the shown order after tabs are hidden (Settings keeps 6, a gap is left, a key opens
+        # the tab that used to have that number), a restart brings the old keys back, or a hidden
+        # Settings has no way back.
         term = self.open()
         term.wait_for(lambda s: "Pty task" in s.text())
-        self.assertEqual(term.screen.lines()[0].split(), ["1", "Agents", "2", "Changes", "3", "Browser", "4", "Pull", "Requests", "5", "Board", "6", "Settings"])
+        self.assertEqual(term.screen.lines()[0].split(), ["Agents", "Changes", "Browser", "Pull", "Requests", "Board", "Settings"])
         term.send(b"6")
         term.wait_for(lambda s: "Browser placement" in s.text())
         self.click_row(term, "[x] Changes")
-        term.wait_for(lambda s: s.lines()[0].split() == ["1", "Agents", "2", "Browser", "3", "Pull", "Requests", "4", "Board", "5", "Settings"])
+        term.wait_for(lambda s: s.lines()[0].split() == ["Agents", "Browser", "Pull", "Requests", "Board", "Settings"])
         term.send(b"1")
         term.wait_for(lambda s: "Pty task" in s.text())
         term.send(b"5")
@@ -462,7 +463,7 @@ class PtyTests(unittest.TestCase):
         for label in ("Browser", "Pull Requests", "Board"):
             self.click_row(term, f"[x] {label}")
             term.wait_for(lambda s, label=label: f"[ ] {label}" in s.text())
-        term.wait_for(lambda s: s.lines()[0].split() == ["1", "Agents", "2", "Settings"])
+        term.wait_for(lambda s: s.lines()[0].split() == ["Agents", "Settings"])
         term.send(b"1")
         term.wait_for(lambda s: "Pty task" in s.text() and "Browser placement" not in s.text())
         term.send(b"6")
@@ -472,20 +473,20 @@ class PtyTests(unittest.TestCase):
         term.send(b"\x03")
         self.assertEqual(term.exit_code(), 0)
         again = self.open()
-        again.wait_for(lambda s: s.lines()[0].split() == ["1", "Agents", "2", "Settings"])
+        again.wait_for(lambda s: s.lines()[0].split() == ["Agents", "Settings"])
         again.send(b"1")
         again.wait_for(lambda s: "Pty task" in s.text())
         again.send(b"2")
         again.wait_for(lambda s: "Browser placement" in s.text())
         self.click_row(again, "[x] Settings")
-        again.wait_for(lambda s: s.lines()[0].split() == ["1", "Agents"])
+        again.wait_for(lambda s: s.lines()[0].split() == ["Agents"])
         again.send(b"1")
         again.wait_for(lambda s: "Pty task" in s.text())
         again.send(b"2")
         self.assertNotIn("Browser placement", again.screen.text())
         again.send(b"6")
         again.wait_for(lambda s: "Browser placement" in s.text())
-        self.assertEqual(again.screen.lines()[0].split(), ["1", "Agents"])
+        self.assertEqual(again.screen.lines()[0].split(), ["Agents"])
 
     @unittest.skipUnless(sys.platform == "darwin", "the Ghostty tab placement is macOS-only; see the next test")
     def test_the_default_placement_opens_one_ghostty_tab_on_the_real_entrypoint(self):
