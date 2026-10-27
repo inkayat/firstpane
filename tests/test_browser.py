@@ -7,8 +7,10 @@ runs its command through /bin/sh. Git runs for real against fixture worktrees, o
 terminal-browser is a fake that records how it was started, serves a registry entry pointing at a
 loopback fake CDP endpoint, keeps a helper child, and runs until it is told to stop. Started
 inside Firstpane it also speaks the embed host protocol: it joins over PIXEL_EMBED, logs every
-host message, reports its placement and writes one shared-memory frame to PIXEL_TTY for each
-init or size message. The terminal's answers to Firstpane's frame queries are fed in as input
+host message with its arrival time, reports its placement and writes one shared-memory frame to
+PIXEL_TTY for each init or size message; while a `stream` file sits in its install root it also
+streams 15 shared-memory frames a second, each naming a new real POSIX object it logs. The
+terminal's answers to Firstpane's frame queries are fed in as input
 bytes. "The user types an address in the browser" is played by rewriting that registry tab and
 the fake page. "The user picks an element with the toolbar's select tool" is played by a
 `grab.json` the fake then sends the way terminal-browser 0.13.4's sendGrab does: to the agent
@@ -16,6 +18,7 @@ bridge in its environment (POST /agent-text with the bearer token), else nowhere
 browser, Ghostty window or tab, pane, profile, inbox or network is used.
 """
 
+import base64
 import json
 import os
 import re
@@ -30,7 +33,7 @@ from concurrent.futures import Future
 from pathlib import Path
 from unittest import mock
 
-from firstpane import browser, placed
+from firstpane import browser, embed, placed
 from firstpane.agents_view import humanize
 from firstpane.app import App
 from firstpane.config import Config
@@ -41,11 +44,11 @@ from firstpane.transport import LiveTransport
 from tests.gitfixture import GitFixture
 from tests.support import (Clock, CmdResult, FakePi, FakeTerminal, FakeTransport, agent_for, note_json, pane,
                            ghostty_argv, remove_launch_runtimes, selected_line, snapshot, workspace, write_meta)
-from tests.test_embed import FakeCdp
+from tests.test_embed import FakeCdp, frame, shm_exists, shm_remove
 
 FRAME = b"\x1b_Ga=T,f=32,t=s,s=4,v=4,i=%d,q=2,U=1,c=4,r=1;L3B4LTEtMC0x\x1b\\"
 FAKE_TB = r'''#!{python}
-import json, os, signal, socket, subprocess, sys, threading, time, urllib.error, urllib.request
+import base64, json, os, signal, socket, subprocess, sys, threading, time, urllib.error, urllib.request
 home, runtime = os.environ["HOME"], os.environ["XDG_RUNTIME_DIR"]
 def log(name, item):
     with open(os.path.join(home, name), "a") as handle:
@@ -66,9 +69,26 @@ registry = {{"browsers": [{{"key": "fake-1", "pid": os.getpid(), "cdpPort": {por
 open(os.path.join(runtime, "registry.json"), "w").write(json.dumps(registry))
 # Logged last: tests wait for this line and then read the registry.
 log("launch.jsonl", {{"argv": sys.argv[1:], "env": dict(os.environ), "pid": os.getpid(), "helper": helper.pid}})
+def stream(tty, image):
+    # While `stream` exists next to bin/: 15 fps of shared-memory frames, one new POSIX object per
+    # frame (as terminal-browser), each name logged before its frame is written.
+    import _posixshmem
+    flag = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(sys.argv[0]))), "stream")
+    n = 0
+    while os.path.exists(flag):
+        name = "/fpt-%d-%d" % (os.getpid(), n)
+        fd = _posixshmem.shm_open(name, os.O_CREAT | os.O_EXCL | os.O_RDWR, mode=0o600)
+        os.ftruncate(fd, 4)
+        os.close(fd)
+        log("shm.jsonl", name)
+        payload = base64.b64encode(name.encode()).decode()
+        os.write(tty, ("\x1b_Ga=T,f=32,s=4,v=4,t=s,i=%d,U=1,c=4,r=1,q=2;%s\x1b\\" % (image, payload)).encode())
+        n += 1
+        time.sleep(1 / 15)
+    log("shm.jsonl", None)
 def embed_host():
     # The embed client: join Firstpane's socket, then place the page and write one frame to the
-    # pty for the init and for every size change.
+    # pty for the init and for every size change (each message is logged with its arrival time).
     host = socket.socket(socket.AF_UNIX)
     host.connect(os.environ["PIXEL_EMBED"])
     host.sendall(json.dumps({{"type": "join", "pane": "p", "name": "fake", "pid": os.getpid()}}).encode() + b"\n")
@@ -76,9 +96,10 @@ def embed_host():
     image = None
     for line in host.makefile("rb"):
         message = json.loads(line)
-        log("host.jsonl", message)
+        log("host.jsonl", dict(message, at=time.monotonic()))
         if message["type"] == "init":
             image = message["imageId"]
+            threading.Thread(target=stream, args=(tty, image), daemon=True).start()
         if message["type"] in ("init", "size"):
             host.sendall(json.dumps({{"type": "placed", "imageId": image, "cols": message["cols"],
                                      "rows": message["rows"]}}).encode() + b"\n")
@@ -279,6 +300,7 @@ class BrowserTabTests(unittest.TestCase):
         while time.time() < deadline:
             self.app.placed.refresh()
             self.app.render()
+            self.app.layout_ready(time.monotonic())  # as the main loop does before each write
             fds = self.app.io_fds()
             ready, _, _ = select.select(fds, [], [], 0.05) if fds else ([], [], [])
             self.pane_bytes += self.app.pump(ready, time.monotonic())
@@ -287,6 +309,33 @@ class BrowserTabTests(unittest.TestCase):
             if not fds:
                 time.sleep(0.02)
         raise AssertionError(f"timed out; frame:\n{self.frame()}")
+
+    def drive(self, seconds, actions):
+        """The main loop's order for `seconds`: render, write the screen only when
+        `layout_ready` allows it, wait for input or the next deadline, pump the browser. At each
+        offset in `actions` (seconds from now) its callable runs, as input would. Returns events
+        (kind, monotonic time, detail): `screen` (image rows on each written screen), `frame`
+        (one per page frame written to the pane) and `action`."""
+        start = time.monotonic()
+        pending = sorted(actions.items())
+        events = []
+        while time.monotonic() - start < seconds:
+            now = time.monotonic()
+            while pending and now - start >= pending[0][0]:
+                events.append(("action", now, pending[0][0]))
+                pending.pop(0)[1]()
+            screen = self.app.render()
+            now = time.monotonic()
+            if self.app.layout_ready(now):
+                events.append(("screen", now, [i for i, line in enumerate(screen.split("\n")) if PLACEHOLDER in line]))
+            deadline = self.app.io_deadline()
+            wait = 0.02 if deadline is None else max(0.0, min(0.02, deadline - time.monotonic()))
+            ready, _, _ = select.select(self.app.io_fds(), [], [], wait)
+            now = time.monotonic()
+            data = self.app.pump(ready, now)
+            self.pane_bytes += data
+            events += [("frame", now, None)] * data.count(b"\x1b_Ga=T")
+        return events
 
     def negotiate(self, answer=SHM_OK):
         """Firstpane asks its terminal at start; the terminal answers in the input stream."""
@@ -443,6 +492,51 @@ class BrowserTabTests(unittest.TestCase):
         self.app.status = "a refusal that is much longer than the pane is wide " * 5
         self.pump(lambda: self.app.browser.grid["rows"] == 30 - top)
         self.assertEqual(self.image_rows(), list(range(top + 1, 31)))
+
+    def test_a_streaming_page_is_bounded_and_layout_changes_wait_for_a_quiet_window(self):
+        # Break: every frame of a 15 fps page reaches the pane (Herdr's client queues them ahead
+        # of every key once its fast image path is lost); entering, leaving, the status line or
+        # a size message lands right after a frame (Herdr turns that path off for good when the
+        # image's placement or size changes while a frame is still on its way); a frame follows
+        # a layout change at once; the wait blocks or starves the keys; or a dropped frame's
+        # shared memory is left behind while a forwarded one is unlinked.
+        quiet = embed.LAYOUT_QUIET
+        (self.tb / "stream").write_text("")
+        self.negotiate()
+        self.choose_inside()
+        self.open_tab("alpha-task")
+        self.pump(lambda: self.image_rows() and len(self.logged("shm.jsonl")) > 3)
+        home = self.profile_home()
+        status = lambda text: lambda: setattr(self.app, "status", text)
+        events = self.drive(6.0, {0.8: status("a refusal"), 1.8: status(""), 2.8: lambda: self.app.handle_key("1"),
+                                  3.8: lambda: self.app.handle_key("3"), 4.8: (self.tb / "stream").unlink})
+        self.app.browser.shutdown(wait=1)
+        names = [name for name in self.logged("shm.jsonl", home) if name]
+        self.addCleanup(lambda: [shm_remove(name) for name in names])
+
+        frames = [at for kind, at, _ in events if kind == "frame"]
+        screens = [(at, rows) for kind, at, rows in events if kind == "screen"]
+        changes = [(at, before, after) for (_, before), (at, after) in zip(screens, screens[1:]) if before != after]
+        self.assertGreaterEqual(len(changes), 4, changes)  # status on, status off, leave, enter
+        for at, before, after in changes:
+            if before:  # the image was placed: nothing may have gone out within the quiet window
+                self.assertGreaterEqual(at - max([f for f in frames if f <= at] + [0]), quiet, (at, before, after))
+            if after:
+                self.assertGreaterEqual(min([f for f in frames if f > at] + [at + quiet]), at + quiet)
+        sizes = [message["at"] for message in self.logged("host.jsonl", home) if message["type"] == "size"]
+        self.assertGreaterEqual(len(sizes), 2)
+        for at in sizes:
+            self.assertFalse([f for f in frames if at - quiet <= f < at], at)
+        self.assertGreaterEqual(len(names), 50)
+        self.assertLessEqual(len(frames), 6.0 / 0.5 + 2)
+        for key_at in (2.8, 3.8):
+            pressed = next(at for kind, at, offset in events if kind == "action" and offset == key_at)
+            before = [rows for at, rows in screens if at < pressed][-1]
+            shown = next(at for at, rows in screens if at > pressed and rows != before)
+            self.assertLessEqual(shown - pressed, quiet + 0.15)
+        forwarded = {base64.b64decode(payload).decode() for payload in re.findall(rb"t=s,i=\d+,U=1,c=4,r=1,q=2;([^\x1b]+)", self.pane_bytes)}
+        for name in names:
+            self.assertEqual(shm_exists(name), name in forwarded, name)
 
     def test_a_placement_change_moves_the_open_browser_on_the_next_open_without_a_second_instance(self):
         # Break: after choosing Inside Firstpane the Ghostty tab keeps running next to the page in
@@ -970,6 +1064,32 @@ class BrowserTabTests(unittest.TestCase):
         self.select("alpha-task")
         self.app.handle_key("3")
         self.assertNotIn("write to FirstMate", self.frame())
+
+
+class LayoutFenceTests(unittest.TestCase):
+    def test_a_pane_that_keeps_resizing_and_a_streaming_page_both_keep_going(self):
+        # Break: while the image's rows keep changing (a resize drag), every change holds the
+        # frames back so the page freezes until resizing stops, or frames keep every change
+        # from being written; or a change lands within the quiet window of a frame or change.
+        quiet = embed.LAYOUT_QUIET
+        page = browser.Browser(None, tempfile.mkdtemp())
+        self.addCleanup(os.rmdir, page.base)
+        frames = [frame(n, image=browser.IMAGE_ID, chunks=1, repeat=1) for n in range(60)]
+        arrivals = {round(n * 1000 / 15 / 10) * 10: frames[n] for n in range(60)}  # 15 fps, 4 s
+        commits, forwarded, written = [], [], None
+        for ms in range(0, 4001, 10):
+            now = ms / 1000
+            view = (1, 10 + (ms // 10) % 2, 100)  # the image's rows change on every tick
+            if page.place(view, now) and view != written:
+                commits.append(now)
+                written = view
+            out = page.stream.feed(arrivals[ms], now) if ms in arrivals else page.stream.due(now)
+            forwarded += [now] * out.count(b"\x1b_Ga=T")
+        self.assertGreaterEqual(len(forwarded), 6)  # about one a second at least, not just the first
+        self.assertGreaterEqual(len(commits), 6)
+        for at in commits[1:]:
+            before = [t for t in forwarded + commits if t < at]
+            self.assertGreaterEqual(at - max(before), quiet - 1e-9, at)
 
 
 if __name__ == "__main__":

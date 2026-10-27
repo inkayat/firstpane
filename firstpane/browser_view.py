@@ -341,6 +341,12 @@ class BrowserTabMixin:
     def io_deadline(self):
         return self.browser.deadline()
 
+    def layout_ready(self, now):
+        """Whether the screen just rendered may be written now: a change of where the page
+        image is placed waits for a quiet window after the last frame (Browser.place)."""
+        tops = [index for index, hit in enumerate(self.hit_rows) if hit and hit.get("kind") == "browser"]
+        return self.browser.place((tops[0], len(tops), self.browser.drawn) if tops else None, now)
+
     def pump(self, ready, now):
         self._settle_frames()
         self._settle_icons()

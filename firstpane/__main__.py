@@ -222,6 +222,7 @@ def main():
     stdin_fd = terminal.stdin.fileno()
     next_refresh = 0
     frame_bytes_only = False
+    held = False
     last_render = 0.0
     last_size = None
     try:
@@ -241,9 +242,13 @@ def main():
             if now >= next_refresh:
                 app.refresh()
                 next_refresh = now + 2
-            if not frame_bytes_only or now - last_render >= STREAM_REPAINT_INTERVAL:
-                terminal.write(app.render(), (app.rows, app.cols))
-                last_render = now
+            if held or not frame_bytes_only or now - last_render >= STREAM_REPAINT_INTERVAL:
+                screen = app.render()
+                # A move of the page image waits for the frame stream to go quiet (never blocks).
+                held = not app.layout_ready(time.monotonic())
+                if not held:
+                    terminal.write(screen, (app.rows, app.cols))
+                    last_render = now
             deadline = app.io_deadline()
             wait = 0.2 if deadline is None else max(0.0, min(0.2, deadline - time.monotonic()))
             ready, _, _ = select.select([stdin_fd, *app.io_fds()], [], [], wait)

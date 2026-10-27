@@ -280,6 +280,9 @@ class Browser(Profiles):
         self.title = None
         self.region = None
         self.cell = DEFAULT_CELL
+        self.sent = None
+        self.drawn = None
+        self.layout = None
         self.visible = False
         self.focused = False
         self.notice = ""
@@ -368,6 +371,7 @@ class Browser(Profiles):
             os.close(slave)
         self.shown = context
         self.stream = FrameStream(IMAGE_ID)
+        self.sent = None
         self.grid = None
         self.title = None
         self.state, self.reason = "starting", ""
@@ -436,6 +440,7 @@ class Browser(Profiles):
         self.child = None
         self.grid = None
         self.focused = False
+        self.stream.discard()
         self._release()
 
     def _release(self):
@@ -472,6 +477,7 @@ class Browser(Profiles):
     def _disconnect(self, reason):
         self.conn.close()
         self.conn = None
+        self.sent = None
         self.grid = None
         self.focused = False
         self.state, self.reason = "disconnected", reason
@@ -482,18 +488,39 @@ class Browser(Profiles):
         return {"type": kind, "cols": cols, "rows": rows, "width": cols * cw, "height": rows * ch, "cell": [cw, ch]}
 
     def set_region(self, rows, cols):
-        region = (max(1, min(rows, MAX_PLACEHOLDER)), max(1, min(cols, MAX_PLACEHOLDER)))
-        if region == self.region:
-            return
-        self.region = region
-        if self.conn is not None:
-            self.send(self._size_message("size"))
+        """The cell grid the page should fill; the page hears of it when `place` allows."""
+        self.region = (max(1, min(rows, MAX_PLACEHOLDER)), max(1, min(cols, MAX_PLACEHOLDER)))
 
     def set_cell(self, width, height):
-        if width > 0 and height > 0 and (width, height) != self.cell:
+        if width > 0 and height > 0:
             self.cell = (width, height)
-            if self.conn is not None:
-                self.send(self._size_message("size"))
+
+    def place(self, view, now):
+        """Whether a screen showing the page image at `view` ((top row, rows, cols) of its
+        placeholders, or None) may be written now; then the page is sent its new size.
+
+        Herdr turns its fast image path off for its client for good when the image's
+        placement or size changes while a frame is still on its way there, so while the image
+        is placed, a change waits until no frame or change went out for LAYOUT_QUIET; frames
+        are held meanwhile and for LAYOUT_QUIET after it (FrameStream.placed). A frame already
+        due goes first, so neither frames nor changes starve while both keep coming. The
+        caller does not block: it renders and asks again by `deadline`."""
+        layout = (view, self.region, self.cell)
+        if layout != self.layout and self.layout is not None and self.layout[0] is not None:
+            if self.stream.ready(now):
+                self.stream.fenced = False
+                return False
+            if not self.stream.settled(now):
+                self.stream.fenced = True
+                return False
+        if self.conn is not None and self.sent is not None and (self.region, self.cell) != self.sent:
+            self.send(self._size_message("size"))
+            self.sent = (self.region, self.cell)
+        if layout != self.layout and view is not None:
+            self.stream.placed(now)
+        self.stream.fenced = False
+        self.layout = layout
+        return True
 
     def set_visible(self, value):
         """Whether the tab shows the page (placeholders drawn). The browser is not told."""
@@ -547,6 +574,7 @@ class Browser(Profiles):
             init = self._size_message("init")
             init.update(imageId=IMAGE_ID, transport=self.medium or "inline", focused=self.focused)
             self.send(init)
+            self.sent = (self.region, self.cell)
             self.state = "running"
         elif kind == "placed":
             self.grid = message
@@ -622,9 +650,12 @@ class Browser(Profiles):
         AgentBridge.reply(conn, 200 if taken else 409)
 
     def body_lines(self, rows, cols):
+        """The page image's placeholder rows (at most `rows` x `cols`); `drawn` keeps their size."""
+        self.drawn = None
         if self.grid is None or not self.visible:
             return []
         grid_rows = int(self.grid.get("rows") or rows)
         grid_cols = int(self.grid.get("cols") or cols)
         image = int(self.grid.get("imageId") or IMAGE_ID)
-        return placeholder_rows(image, min(rows, grid_rows), min(cols, grid_cols))
+        self.drawn = (min(rows, grid_rows), min(cols, grid_cols))
+        return placeholder_rows(image, *self.drawn)

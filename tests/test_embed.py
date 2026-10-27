@@ -1,9 +1,11 @@
-"""In-tab browser helpers: inline-frame coalescing, CDP-only capture, child env.
+"""In-tab browser helpers: frame coalescing and quiet windows, CDP-only capture, child env.
 
 Each test names the production break it exists to catch. Frames, registry records and CDP
-replies are hand-built fixtures shaped like terminal-browser 0.13.4 output.
+replies are hand-built fixtures shaped like terminal-browser 0.13.4 output; shared-memory frames
+name real POSIX shared-memory objects this test creates and removes.
 """
 
+import _posixshmem
 import base64
 import hashlib
 import json
@@ -19,7 +21,7 @@ import unittest
 from unittest import mock
 from pathlib import Path
 
-from firstpane.embed import CaptureError, FrameStream, browser_env, capture_context
+from firstpane.embed import LAYOUT_QUIET, CaptureError, FrameStream, browser_env, capture_context
 
 IMAGE = 32322
 
@@ -43,6 +45,56 @@ def frame(n, image=IMAGE, chunks=3, medium="d", size=(1952, 1190), repeat=40):
 
 def delete(image=IMAGE):
     return f"\x1b_Ga=d,d=I,i={image},q=2\x1b\\".encode()
+
+
+def named(name, image=IMAGE, medium="s", size=(1904, 1564)):
+    """One a=T frame naming a shared-memory object (t=s) or file (t=f), as kitty_transmit_named."""
+    payload = base64.b64encode(name.encode()).decode()
+    return (f"\x1b_Ga=T,f=32,s={size[0]},v={size[1]},t={medium},i={image},U=1,c=119,r=46,q=2;"
+            f"{payload}\x1b\\").encode()
+
+
+def shm_exists(name):
+    try:
+        os.close(_posixshmem.shm_open(name, os.O_RDONLY, mode=0o600))
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def shm_remove(name):
+    """Unlink `name` as the terminal would after reading it; already gone is fine."""
+    try:
+        _posixshmem.shm_unlink(name)
+    except FileNotFoundError:
+        pass
+
+
+class SharedMemoryFrames:
+    """Real shared-memory objects named like terminal-browser's, one per frame; whatever is left
+    at the end (what the terminal would have read and unlinked) is removed."""
+
+    def __init__(self, test, count):
+        tag = f"/fpt-{os.getpid()}-{os.urandom(3).hex()}"
+        self.names = [f"{tag}-{n}" for n in range(count)]
+        for name in self.names:
+            fd = _posixshmem.shm_open(name, os.O_CREAT | os.O_EXCL | os.O_RDWR, mode=0o600)
+            os.ftruncate(fd, 4)
+            os.close(fd)
+        test.addCleanup(lambda: [shm_remove(name) for name in self.names])
+
+
+def run_stream(stream, arrivals, end_ms, tick_ms=10):
+    """Feed `arrivals` ({ms: bytes}) and poll `due` every tick, as the host loop does; returns
+    [(seconds, bytes)] for every non-empty write."""
+    emitted = []
+    for ms in range(0, end_ms + 1, tick_ms):
+        now = ms / 1000
+        out = stream.feed(arrivals[ms], now) if ms in arrivals else b""
+        out += stream.due(now)
+        if out:
+            emitted.append((now, out))
+    return emitted
 
 
 class FrameStreamTests(unittest.TestCase):
@@ -134,6 +186,79 @@ class FrameStreamTests(unittest.TestCase):
         self.assertEqual(stream.feed(big, 0.0), big)
         self.assertEqual(stream.feed(b"\x1b_Ga=T,i=5;" + b"A" * 5000, 0.1), b"")
         self.assertEqual(stream.feed(b"\x1b_Ga=d,d=I,i=5\x1b\\", 0.2), b"\x1b_Ga=d,d=I,i=5\x1b\\")
+
+    def test_shared_memory_frames_at_15_fps_are_bounded_end_on_the_newest_and_dropped_ones_are_unlinked(self):
+        # Break: every shm frame still reaches the pane at the page's rate (Herdr's client then
+        # queues full images ahead of every key), the trailing frame is dropped so the pane
+        # stalls on an old image, or a superseded frame's shared memory is never unlinked (no
+        # terminal ever reads it, so each leaks a full RGBA canvas until reboot).
+        shm = SharedMemoryFrames(self, 90)
+        frames = [named(name) for name in shm.names]
+        arrivals = {round(n * 1000 / 15 / 10) * 10: frames[n] for n in range(90)}  # 15 fps, 6 s
+        emitted = run_stream(FrameStream(IMAGE), arrivals, 7000)
+        self.assertLessEqual(len(emitted), 13)  # one at 0 s, then at most one per 0.5 s to 6 s
+        order = [frames.index(out) for _, out in emitted]
+        self.assertEqual(order, sorted(order))
+        gaps = [b[0] - a[0] for a, b in zip(emitted, emitted[1:])]
+        self.assertGreaterEqual(min(gaps), 0.5 - 1e-9)
+        self.assertEqual(emitted[-1][1], frames[89])
+        forwarded = {shm.names[n] for n in order}
+        for name in shm.names:
+            self.assertEqual(shm_exists(name), name in forwarded, name)
+
+    def test_file_frames_are_bounded_and_the_browsers_ring_files_are_never_deleted(self):
+        # Break: file frames pass at the page's rate, or a dropped frame's file is deleted:
+        # terminal-browser rewrites the same eight files in turn, so deleting one breaks a
+        # later frame that names it.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        ring = Path(tmp.name)
+        slots = [ring / f"terminal-browser-1-0-0-{n}.rgba" for n in range(8)]
+        for slot in slots:
+            slot.write_bytes(b"\0\0\0\xff")
+        frames = [named(str(slots[n % 8]), medium="f") for n in range(45)]
+        arrivals = {round(n * 1000 / 15 / 10) * 10: frames[n] for n in range(45)}  # 15 fps, 3 s
+        emitted = run_stream(FrameStream(IMAGE), arrivals, 4000)
+        self.assertLessEqual(len(emitted), 7)
+        self.assertEqual(emitted[-1][1], frames[44])
+        self.assertTrue(all(slot.exists() for slot in slots))
+
+    def test_controls_between_shared_memory_frames_keep_their_order(self):
+        # Break: a delete or other command overtakes the held shm frame it followed, is
+        # dropped, or the held frame is unlinked although it was forwarded.
+        shm = SharedMemoryFrames(self, 3)
+        one, two, three = (named(name) for name in shm.names)
+        stream = FrameStream(IMAGE)
+        self.assertEqual(stream.feed(one, 0.0), one)
+        self.assertEqual(stream.feed(two, 0.1), b"")  # held
+        self.assertEqual(stream.feed(delete() + b"\x1b[?25l", 0.2), two + delete() + b"\x1b[?25l")
+        self.assertEqual(stream.feed(three, 0.3) + stream.due(5.0), three)
+        self.assertTrue(all(shm_exists(name) for name in shm.names))
+
+    def test_a_resized_frame_after_the_browsers_delete_waits_for_the_quiet_window(self):
+        # Break: the browser's delete-and-resize reaches the pane right behind the previous
+        # frame, while Herdr may still be sending that frame to its client natively; a size
+        # change then turns Herdr's fast image path off for that client for good.
+        shm = SharedMemoryFrames(self, 3)
+        old, held, resized = named(shm.names[0]), named(shm.names[1]), named(shm.names[2], size=(1904, 1530))
+        stream = FrameStream(IMAGE)
+        self.assertEqual(stream.feed(old, 0.0), old)
+        self.assertEqual(stream.feed(held, 0.1), b"")
+        self.assertEqual(stream.feed(delete() + resized, 0.2), held + delete())
+        self.assertEqual(stream.due(0.2 + LAYOUT_QUIET - 0.02), b"")
+        self.assertEqual(stream.deadline(), 0.2 + LAYOUT_QUIET)
+        self.assertEqual(stream.due(0.2 + LAYOUT_QUIET), resized)
+
+    def test_discarding_the_stream_unlinks_its_held_shared_memory_frame(self):
+        # Break: closing or switching the browser drops the held frame's shared memory without
+        # unlinking it (nothing else will: the browser is gone).
+        shm = SharedMemoryFrames(self, 2)
+        stream = FrameStream(IMAGE)
+        stream.feed(named(shm.names[0]), 0.0)
+        stream.feed(named(shm.names[1]), 0.1)
+        stream.discard()
+        self.assertEqual([shm_exists(name) for name in shm.names], [True, False])
+        self.assertEqual(stream.due(5.0), b"")
 
 
 class BrowserEnvTests(unittest.TestCase):
