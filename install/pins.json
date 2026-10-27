@@ -1,0 +1,60 @@
+{
+  "firstpane_remote": "https://github.com/inkayat/firstpane.git",
+  "herdr_min": "0.9.0",
+  "python_min": "3.11",
+  "terminal_browser": {
+    "version": "0.13.4",
+    "max_uncompressed_bytes": 800000000,
+    "assets": {
+      "darwin-arm64": {
+        "url": "https://github.com/zenbu-labs/terminal-browser/releases/download/v0.13.4/terminal-browser-darwin-arm64.tar.gz",
+        "sha256": "f017230c78c60a07ef4451a1eb0a92727f0b955a8fcd87aec358910c5d0c03c7",
+        "size": 141704278
+      },
+      "darwin-x64": {
+        "url": "https://github.com/zenbu-labs/terminal-browser/releases/download/v0.13.4/terminal-browser-darwin-x64.tar.gz",
+        "sha256": "01bc6991bad122f42e4f2a5164a198d8384b944c036de112078fd51f58dc67ed",
+        "size": 149889617
+      },
+      "linux-arm64": {
+        "url": "https://github.com/zenbu-labs/terminal-browser/releases/download/v0.13.4/terminal-browser-linux-arm64.tar.gz",
+        "sha256": "0cf567d8218995a24fb6ce4b06c07ccf58a8c517906058087355f1e2fad1969f",
+        "size": 138044592
+      },
+      "linux-x64": {
+        "url": "https://github.com/zenbu-labs/terminal-browser/releases/download/v0.13.4/terminal-browser-linux-x64.tar.gz",
+        "sha256": "6277daaabab16711ab3f1961cdffad9efac5e70ac55d5076e2c86496d649d3a4",
+        "size": 136646100
+      }
+    }
+  },
+  "sender_patch": {
+    "status": "bundled",
+    "identity": "terminal-browser-0.13.4-context",
+    "applies_to": "0.13.4",
+    "substitutions": {
+      "sha256": "da8adbd143eb501e5a5e5488cbc9d1b30cbea6465ae582ad9441cd5ee0dea795",
+      "size": 2415
+    },
+    "apply": {
+      "sha256": "20dc63714896172aaf6b7579ac8a70e6fd5ca1be02bb79e29126c39fa2f01e13",
+      "size": 1062
+    },
+    "files": [
+      {
+        "path": "browser/dist/main.js",
+        "pre_sha256": "cf73503a06a944da8e349d4e60a7bb221e028255b02851bddecd7a65ba6e7175",
+        "pre_size": 1931324,
+        "post_sha256": "9de9e45c3fcbc04e67627169d53d8f7c8b24c344787d40b6cbf6c36858ac1bfe",
+        "post_size": 1931539
+      },
+      {
+        "path": "assets/react-grab/index.global.js",
+        "pre_sha256": "effbc12a5d13e94664c1a20adb4cf90b477487a06571421c5ab3a64f09439f98",
+        "pre_size": 308797,
+        "post_sha256": "30d15cff9ec650ee9b4231b5f48d38a4febb9533aeace1abaef98da43ebe76f5",
+        "post_size": 308803
+      }
+    ]
+  }
+}

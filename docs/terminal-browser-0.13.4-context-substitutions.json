@@ -1,0 +1,45 @@
+{
+  "version": "0.13.4",
+  "files": {
+    "browser/dist/main.js": [
+      {
+        "old": "transformCopyContent: (content) => {\n        emit({ type: \"selected\", content });",
+        "new": "transformCopyContent: (content, _elements, note) => {\n        emit({ type: \"selected\", content, context: typeof note === \"string\" ? note : \"\" });"
+      },
+      {
+        "old": "this.hooks.selected(message.content);",
+        "new": "this.hooks.selected(message.content, message.context);"
+      },
+      {
+        "old": "selected: (content3) => void this.sendGrab(content3),",
+        "new": "selected: (content3, context) => void this.sendGrab(content3, context),"
+      },
+      {
+        "old": "async sendGrab(content3) {",
+        "new": "async sendGrab(content3, context) {"
+      },
+      {
+        "old": "const target = await this.agentPanes.send(content3);",
+        "new": "const target = await this.agentPanes.send(content3, context);"
+      },
+      {
+        "old": "  async send(content3) {\n    if (this.ctx.embedded) {\n      const taken = await this.ctx.embedded.send(content3).catch(() => false);",
+        "new": "  async send(content3, context) {\n    if (this.ctx.embedded) {\n      const taken = await this.ctx.embedded.send(content3, context).catch(() => false);"
+      },
+      {
+        "old": "    async send(content3) {\n      const response = await fetch(`${url2.replace(/\\/$/, \"\")}/agent-text`, {\n        method: \"POST\",\n        headers: { \"content-type\": \"application/json\", ...token ? { authorization: `Bearer ${token}` } : {} },\n        body: JSON.stringify({ text: content3 })\n      });",
+        "new": "    async send(content3, context) {\n      const response = await fetch(`${url2.replace(/\\/$/, \"\")}/agent-text`, {\n        method: \"POST\",\n        headers: { \"content-type\": \"application/json\", ...token ? { authorization: `Bearer ${token}` } : {} },\n        body: JSON.stringify(typeof context === \"string\" && context ? { text: content3, context } : { text: content3 })\n      });"
+      }
+    ],
+    "assets/react-grab/index.global.js": [
+      {
+        "old": "transformCopyContent:async(e,t)=>w(`transformCopyContent`,e,t)",
+        "new": "transformCopyContent:async(e,t,r)=>w(`transformCopyContent`,e,t,r)"
+      },
+      {
+        "old": "t.transformCopyContent(c,n)",
+        "new": "t.transformCopyContent(c,n,r)"
+      }
+    ]
+  }
+}
