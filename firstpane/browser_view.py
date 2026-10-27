@@ -156,7 +156,7 @@ class BrowserTabMixin:
         if context is None:
             self.status = why
         elif not self._browser_shows(context):
-            self.status = "no browser in this tab yet; choose the Browser tab (3) to start it"
+            self.status = "no browser in this tab yet; choose the Browser tab to start it"
         elif self.browser.grid is None:
             self.status = "the page is still starting"
         else:

@@ -83,7 +83,7 @@ class SettingsMixin:
                     for part in word_wrap(text, max(1, self.cols - indent))]
 
         lines = [(" " + paint("Browser placement", rgb_fg(BRIGHT, bold=True), plain), None)]
-        lines += prose("Where the Browser tab (3) opens the selected agent's browser")
+        lines += prose("Where the Browser tab opens the selected agent's browser")
         lines.append(("", None))
         width = 2 + 4 + LABEL_WIDTH  # cursor, mark, label
         wide = self.cols >= 1 + width + 3 + max(len(note) for note in PLACEMENT_NOTES.values())

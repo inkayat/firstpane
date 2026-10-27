@@ -391,7 +391,7 @@ class PlacedBrowser(Profiles):
     def focus(self, context):
         self.refresh()
         if self.record is None:
-            return "no browser open; the Browser tab (3) opens one"
+            return "no browser open; the Browser tab opens one"
         refusal = self._other(context, "focus")
         if refusal:
             return refusal
