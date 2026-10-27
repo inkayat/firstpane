@@ -20,7 +20,7 @@ Version **0.1.0** (`herdr-plugin.toml`). Source: [inkayat/firstpane](https://git
 
 ## Features
 
-- **Agents**: the agents Herdr detects in your session, grouped by project. Each row shows the title, status, changed-file count, harness icon, and the model and effort FirstMate recorded at launch. Search with `/` and filter by status with `f`. `g` focuses the agent's Herdr pane.
+- **Agents**: the agents Herdr detects in your session, grouped by project. Task clones that Git shows were made from the same project are listed under one heading. Each row shows the title, status, changed-file count, harness icon, and the model and effort FirstMate recorded at launch. Search with `/` and filter by status with `f`. `g` focuses the agent's Herdr pane.
 - **Changes**: the selected agent's worktree, one file at a time, with old and new line numbers. Stage and unstage files. A Git menu offers commit, fetch, fast-forward pull and push. Select diff lines to write a note to FirstMate about them.
 - **Pull Requests**: the PR for the selected agent's branch, or any open PR in your projects. It has Files, Comments and Checks views. You can post a GitHub comment and resolve review conversations. It uses your logged-in `gh` CLI.
 - **Board** (FirstMate only): a read-only view of FirstMate's task board, with TODO, Working, Waiting Review, Blocked and Done lanes. You cannot add, move or close tasks here.
