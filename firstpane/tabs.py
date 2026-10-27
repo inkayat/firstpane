@@ -1,4 +1,4 @@
-"""The tab row: tab names in number-key order (`1`-`6`), their labels, and the short labels a narrow pane uses."""
+"""The tab row: tab names in their usual order (the number keys count only the shown ones), their labels, and the short labels a narrow pane uses."""
 
 TABS = ("agents", "changes", "browser", "prs", "board", "settings")
 TAB_LABELS = {
