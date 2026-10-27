@@ -129,9 +129,10 @@ class FrameStreamTests(unittest.TestCase):
             self.assertEqual(stream.feed(frame(n), float(n)), frame(n))
         self.assertEqual(stream.due(10.0), b"")
 
-    def test_control_commands_flush_the_held_frame_first_and_are_never_dropped(self):
-        # Break: a delete/other-image/file-backed command is discarded, or overtakes the held
-        # frame it followed, so Ghostty sees frames and deletes out of order.
+    def test_control_commands_wait_behind_the_held_frame_and_are_never_dropped(self):
+        # Break: a delete/other-image/file-backed command is discarded, overtakes the held
+        # frame it followed (Ghostty sees frames and deletes out of order), or flushes that
+        # frame before the interval has passed.
         cases = {
             "delete": delete(),
             "other image id": frame(7, image=99),
@@ -143,7 +144,9 @@ class FrameStreamTests(unittest.TestCase):
                 stream = FrameStream(IMAGE)
                 self.assertEqual(stream.feed(frame(1), 0.0), frame(1))
                 self.assertEqual(stream.feed(frame(2), 0.1), b"")  # held
-                self.assertEqual(stream.feed(control, 0.2), frame(2) + control)
+                self.assertEqual(stream.feed(control, 0.2), b"")
+                self.assertEqual(stream.due(0.5 - 0.01), b"")
+                self.assertEqual(stream.due(0.5), frame(2) + control)
                 self.assertEqual(stream.due(5.0), b"")
 
     def test_frames_split_at_any_byte_are_forwarded_whole(self):
@@ -157,7 +160,8 @@ class FrameStreamTests(unittest.TestCase):
             out += piece
             if piece:
                 self.assertTrue(out.endswith(b"\x1b\\"), "forwarded a partial sequence")
-        self.assertEqual(out, frame(1) + delete() + frame(2))
+        self.assertEqual(out, frame(1) + delete())
+        self.assertEqual(stream.due(0.5), frame(2))
 
     def test_exit_with_an_unfinished_frame_forwards_only_complete_ones(self):
         # Break: the chunks of a frame whose final chunk never arrived reach the pane on exit,
@@ -231,8 +235,9 @@ class FrameStreamTests(unittest.TestCase):
         stream = FrameStream(IMAGE)
         self.assertEqual(stream.feed(one, 0.0), one)
         self.assertEqual(stream.feed(two, 0.1), b"")  # held
-        self.assertEqual(stream.feed(delete() + b"\x1b[?25l", 0.2), two + delete() + b"\x1b[?25l")
-        self.assertEqual(stream.feed(three, 0.3) + stream.due(5.0), three)
+        self.assertEqual(stream.feed(delete() + b"\x1b[?25l", 0.2), b"")
+        self.assertEqual(stream.due(0.5), two + delete() + b"\x1b[?25l")
+        self.assertEqual(stream.feed(three, 0.6) + stream.due(5.0), three)
         self.assertTrue(all(shm_exists(name) for name in shm.names))
 
     def test_a_resized_frame_after_the_browsers_delete_waits_for_the_quiet_window(self):
@@ -241,13 +246,73 @@ class FrameStreamTests(unittest.TestCase):
         # change then turns Herdr's fast image path off for that client for good.
         shm = SharedMemoryFrames(self, 3)
         old, held, resized = named(shm.names[0]), named(shm.names[1]), named(shm.names[2], size=(1904, 1530))
-        stream = FrameStream(IMAGE)
+        stream = FrameStream(IMAGE, quiet=1.0)
         self.assertEqual(stream.feed(old, 0.0), old)
         self.assertEqual(stream.feed(held, 0.1), b"")
-        self.assertEqual(stream.feed(delete() + resized, 0.2), held + delete())
-        self.assertEqual(stream.due(0.2 + LAYOUT_QUIET - 0.02), b"")
-        self.assertEqual(stream.deadline(), 0.2 + LAYOUT_QUIET)
-        self.assertEqual(stream.due(0.2 + LAYOUT_QUIET), resized)
+        self.assertEqual(stream.feed(delete() + resized, 0.2), b"")
+        self.assertEqual(stream.due(1.0 - 0.02), b"")
+        self.assertEqual(stream.deadline(), 1.0)
+        self.assertEqual(stream.due(1.0), delete() + resized)
+        self.assertFalse(shm_exists(shm.names[1]))
+        self.assertTrue(shm_exists(shm.names[2]))
+
+    def test_control_output_cannot_release_a_frame_inside_the_hold_after_a_placed_layout(self):
+        # Break: the delete the browser sends before its resized frame flushes the held old-size
+        # frame (and the delete) right behind the layout change the page was just told about.
+        stream = FrameStream(IMAGE, interval=0.0)
+        self.assertEqual(stream.feed(frame(1), 0.0), frame(1))
+        stream.placed(1.0)
+        self.assertEqual(stream.feed(frame(2), 1.01), b"")
+        self.assertEqual(stream.feed(delete(), 1.03), b"")
+        self.assertEqual(stream.feed(frame(3, size=(1000, 800)), 1.04), b"")
+        self.assertEqual(stream.due(1.0 + LAYOUT_QUIET - 0.01), b"")
+        self.assertEqual(stream.due(1.0 + LAYOUT_QUIET), delete() + frame(3, size=(1000, 800)))
+
+    def test_control_output_cannot_release_a_frame_while_a_layout_change_waits(self):
+        # Break: a cursor command flushes the held frame although `fenced` says a layout change
+        # waits for the frames to stop, so the change never finds the quiet it needs.
+        stream = FrameStream(IMAGE)
+        stream.feed(frame(1), 0.0)
+        stream.feed(frame(2), 0.1)
+        stream.fenced = True
+        self.assertEqual(stream.feed(b"\x1b[?25l", 0.7), b"")
+        self.assertEqual(stream.due(9.0), b"")
+        stream.fenced = False
+        self.assertEqual(stream.due(9.0), frame(2) + b"\x1b[?25l")
+
+    def test_a_browser_interleaving_controls_is_still_limited_to_the_frame_interval(self):
+        # Break: a control command between frames resets the interval, so every frame of a
+        # 15 fps page that sends a cursor command with each one reaches the pane.
+        frames = [frame(n) for n in range(90)]
+        arrivals = {round(n * 1000 / 15 / 10) * 10: b"\x1b[?25l" + frames[n] + delete() for n in range(90)}
+        stream = FrameStream(IMAGE)
+        data, frame_times = b"", []
+        for ms in range(0, 7001, 10):
+            now = ms / 1000
+            before = stream.frames_out
+            data += stream.feed(arrivals[ms], now) if ms in arrivals else stream.due(now)
+            if stream.frames_out > before:
+                frame_times.append(now)
+        self.assertLessEqual(len(frame_times), 13)
+        self.assertGreaterEqual(min(b - a for a, b in zip(frame_times, frame_times[1:])), 0.5 - 1e-9)
+        self.assertIn(frames[89], data)
+        self.assertEqual(data.count(delete()), 90)
+        self.assertEqual(data.count(b"\x1b[?25l"), 90)
+
+    def test_output_held_with_a_frame_is_bounded_and_dropped_with_the_stream(self):
+        # Break: a browser flooding control output while a frame is held grows memory without
+        # limit; discarding the stream forwards or keeps what was held.
+        stream = FrameStream(IMAGE, max_pending=100)
+        stream.feed(frame(1), 0.0)
+        stream.feed(frame(2), 0.1)
+        self.assertEqual(stream.feed(b"x" * 60, 0.2), b"")
+        self.assertEqual(stream.feed(b"y" * 60, 0.3), frame(2) + b"x" * 60 + b"y" * 60)
+        self.assertEqual(stream.deferred, 0)
+        stream.feed(frame(3), 0.4)
+        stream.feed(b"z", 0.45)
+        stream.discard()
+        self.assertEqual((stream.lead, stream.behind, stream.deferred), ([], [], 0))
+        self.assertEqual(stream.due(9.0), b"")
 
     def test_discarding_the_stream_unlinks_its_held_shared_memory_frame(self):
         # Break: closing or switching the browser drops the held frame's shared memory without
