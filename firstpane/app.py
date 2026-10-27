@@ -1001,13 +1001,25 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
         # A private clone is listed on Agents only; it neither joins Pull Requests nor changes how
         # the projects there are labelled.
         agents_only = private - shared
-        # A private clone Git proves was made from a listed project is listed under it. Its rows
-        # keep the clone as project_key: their workspace, Git actions and messages use that.
+        # A private clone Git proves was made from a listed project is listed under it; clones
+        # Git proves share a source that is not listed share one heading. Their rows keep the
+        # clone as project_key: their workspace, Git actions and messages use that.
         listed = [key for key in groups if key not in agents_only]
+        siblings = {}
         for key in sorted(agents_only):
-            source = self._clone_project(key, listed)
-            if source:
-                groups[source]["agents"].extend(groups.pop(key)["agents"])
+            origin = self._clone_origin(key, listed)
+            if not origin:
+                continue
+            kind, source = origin
+            matches = [source] if kind == "path" and source in listed else (
+                self._listed_with_remote(source, listed) if kind == "url" else [])
+            if len(matches) == 1:
+                groups[matches[0]]["agents"].extend(groups.pop(key)["agents"])
+            elif not matches:
+                siblings.setdefault(origin, []).append(key)
+        for keys in siblings.values():
+            for key in keys[1:]:
+                groups[keys[0]]["agents"].extend(groups.pop(key)["agents"])
         agents_only = {key for key in agents_only if key in groups}
         label_of = display_labels([key for key in groups if key not in agents_only])
         every = display_labels(list(groups))
@@ -1204,28 +1216,28 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
         first = (log or "").splitlines()[-1:] or [""]
         return first[0].removeprefix("clone: from ") if first[0].startswith("clone: from ") else None
 
-    def _clone_project(self, path, listed, depth=4):
-        """The listed project the clone at `path` was made from, or None. A local source is
-        matched by its Git common dir (a clone of another of this home's clones is followed); a
-        URL only when exactly one listed project has that origin. A name or shared history alone
-        proves nothing."""
+    def _clone_origin(self, path, listed, depth=4):
+        """What the clone at `path` was made from, as ("path", Git common dir) or ("url", remote),
+        or None when Git does not prove it. A local source is matched by its Git common dir (a
+        clone of another of this home's clones is followed to where that came from, unless the
+        source is listed); a name or shared history alone proves nothing."""
         source = self._clone_source(path)
         if not source or depth == 0:
             return None
         if source.startswith("/"):
             common = self._common_dir(source)
             key = _canonical(common) if common else None
-            if key in listed:
-                return key
-            if key and key != path and path_in_scope(key, str(Path(self.config.firstmate_home) / "data")):
-                return self._clone_project(key, listed, depth - 1)
-            return None
+            if not key:
+                return None
+            if key not in listed and key != path and path_in_scope(key, str(Path(self.config.firstmate_home) / "data")):
+                return self._clone_origin(key, listed, depth - 1) or ("path", key)
+            return ("path", key)
         remote = parse_git_remote_url(source)
-        if not remote:
-            return None
-        matches = [key for key in listed if parse_git_remote_url(self._git_text(
+        return ("url", remote) if remote else None
+
+    def _listed_with_remote(self, remote, listed):
+        return [key for key in listed if parse_git_remote_url(self._git_text(
             key, "config", "--default", "", "--get", f"remote.{self.config.remotes.get(key, 'origin')}.url")) == remote]
-        return matches[0] if len(matches) == 1 else None
 
     def _checkout_from_common(self, common, cwd):
         path = Path(common)

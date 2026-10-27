@@ -267,6 +267,46 @@ class PrivateSourceTests(unittest.TestCase):
         app, _ = self.listed()
         self.assertEqual(self.listed_under(app, "alpha-one"), (str(one), str(one)))
 
+    def test_clones_of_one_unlisted_source_share_a_heading_and_keep_their_own_source(self):
+        # Break (the user's case): two task-private clones of a project that is not itself listed
+        # (`gamma/source/<hash>` twice) are separate headings, one clone's agent is re-pointed at
+        # the other clone, or clones of different unlisted sources, of an unprovable one, or with
+        # a lookalike origin are merged with them.
+        self.report("alpha-task", self.alpha, self.worktree(self.alpha, self.root / "alpha-wt", "fm/alpha-task"), number=1)
+        gamma = self.repo(self.root / "elsewhere" / "gamma")
+        delta = self.repo(self.root / "elsewhere" / "delta")
+        one, one_wt = self.clone(gamma, "one-pool")
+        two, two_wt = self.clone(one, "two-pool")
+        other, other_wt = self.clone(delta, "other-pool", name="gamma")
+        bare, bare_wt = self.clone(gamma, "bare-pool")
+        shutil.rmtree(bare / ".git" / "logs")
+        hosted, hosted_wt = self.clone(gamma, "hosted-pool", origin="https://github.com/acme/gamma.git")
+        hosted_too, hosted_too_wt = self.clone(delta, "hosted-too-pool", origin="https://github.com/acme/gamma.git")
+        cases = {"gamma-one": (one, one_wt), "gamma-two": (two, two_wt), "gamma-other": (other, other_wt),
+                 "gamma-bare": (bare, bare_wt), "gamma-hosted": (hosted, hosted_wt), "gamma-hosted-too": (hosted_too, hosted_too_wt)}
+        for number, (task, (source, wt)) in enumerate(cases.items(), start=2):
+            self.report(task, source, wt, number=number)
+        app, text = self.listed()
+        self.assertEqual(sorted(count for _, count in self.headers(text)), [1, 1, 1, 2, 2], text)
+        for task, (source, _) in cases.items():
+            self.assertEqual(self.listed_under(app, task)[1], str(source), task)
+        self.assertEqual(self.listed_under(app, "gamma-one")[0], self.listed_under(app, "gamma-two")[0])
+        self.assertEqual(self.listed_under(app, "gamma-hosted")[0], self.listed_under(app, "gamma-hosted-too")[0])
+        self.assertEqual(len({self.listed_under(app, task)[0] for task in cases}), 4)
+
+    def test_clones_sharing_an_origin_two_listed_projects_share_stay_apart(self):
+        # Break: ambiguous identity (the origin names two listed projects) is merged anyway.
+        for path in (self.alpha, self.repo(self.home / "projects" / "alpha-mirror")):
+            self.git(path, "remote", "add", "origin", "https://github.com/acme/alpha.git")
+        self.report("alpha-task", self.alpha, self.worktree(self.alpha, self.root / "alpha-wt", "fm/alpha-task"), number=1)
+        one, one_wt = self.clone(self.alpha, "one-pool", origin="https://github.com/acme/alpha.git")
+        two, two_wt = self.clone(self.alpha, "two-pool", origin="https://github.com/acme/alpha.git")
+        self.report("alpha-one", one, one_wt, number=2)
+        self.report("alpha-two", two, two_wt, number=3)
+        app, _ = self.listed()
+        self.assertEqual(self.listed_under(app, "alpha-one"), (str(one), str(one)))
+        self.assertEqual(self.listed_under(app, "alpha-two"), (str(two), str(two)))
+
     def test_selection_fold_search_and_message_keep_the_exact_clone_agent_after_grouping(self):
         # Break: grouping sends the message with the listed project's path or another agent's
         # pane/workspace, unfolding the project restores an agent other than the one last
