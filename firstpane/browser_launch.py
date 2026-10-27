@@ -1,5 +1,5 @@
-"""Runs where the placed browser shows (firstpane/placed.py): in the Herdr pane beside Firstpane
-or in a Ghostty tab, as `exec <python> -I -B browser_launch.py <spec.json>`.
+"""Runs in the Ghostty tab the placed browser opens (firstpane/placed.py), as
+`<python> -I -B browser_launch.py <spec.json>`, which Ghostty runs with `exec`.
 
 Reads the spec Firstpane wrote, records this pid (exec keeps it, so it stays the browser's pid),
 and replaces itself with `terminal-browser open [<url>]` in the spec's private environment (no

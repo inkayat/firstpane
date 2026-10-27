@@ -1,27 +1,35 @@
-"""Browser tab: opens the selected agent's own browser where Settings says (firstpane/placed.py):
-a new tab in the Ghostty window in front (the default) or a Herdr pane beside Firstpane. The tab itself
-draws no page; it says whose browser is open where, and the keys that act on it.
+"""Browser tab: the selected agent's own browser, where Settings says: drawn inside Firstpane in
+the tab body (Inside Firstpane, firstpane/browser.py), or in a new tab of the Ghostty window in
+front (Ghostty tab, the default, firstpane/placed.py).
 
 Every agent context (agent identity plus its source worktree) has its own profile and remembered
-address; one context's browser is open at a time. Choosing the tab opens the selected context's
-browser at its remembered address (or blank), or keeps the one already open; the user types
-addresses in the browser's own address field. `f` or Enter brings that browser forward, `x`
-closes it. `a` (or Ctrl-G) captures the page URL, title and marked selection into the inline
-message (firstpane/composer_view.py); a pick made with the browser's own select tool (toolbar
-icon) arrives through its agent bridge and opens the same message with the picked element.
-There is no global message field.
+address; one context's browser is open at a time, in one placement: choosing the tab first ends
+the browser open in the other placement (its address is remembered). Choosing the tab opens the
+selected context's browser at its remembered address (or blank), or keeps the one already open;
+the user types addresses in the browser's own address field. `x` closes it. `a` (or Ctrl-G)
+captures the page URL, title and marked selection into the inline message
+(firstpane/composer_view.py); a pick made with the browser's own select tool (toolbar icon)
+arrives through its agent bridge and opens the same message with the picked element. There is
+no global message field.
 
-The in-tab page (firstpane/browser.py's Browser: embed host, frames, page keyboard and mouse)
-is not opened from here; its wiring below is dormant until that path is chosen again.
+Inside Firstpane the page fills the tab. A line appears only for an error, a refusal, a capture
+in progress, or a frame transport that is not the fast path; shortcut prose is not printed. Keys
+stay with Firstpane until the page gets the keyboard (`f`, Enter, or a click on the page, which
+is also how text is selected); then every key except Ctrl-G (message FirstMate), Ctrl-O (back to
+Firstpane) and Ctrl-C (exit) goes to the page, with its modifiers. The wheel and plain pointer
+movement reach the page under the pointer either way.
+
+In a Ghostty tab the Browser tab draws no page: it says whose browser is open there and the keys
+that act on it; `f` or Enter brings that tab forward.
 """
 
 from firstpane.browser import who
 from firstpane.composer_view import anchor_key
 from firstpane.embed import CaptureError
 from firstpane.icons import NO_GRAPHICS
-from firstpane.placed import PLACEMENT_LABELS
 from firstpane.pr_view import word_wrap
 from firstpane.sanitize import sanitize
+from firstpane.settings_view import PLACEMENT_LABELS
 from firstpane.style import INK, MUTED, paint, rgb_fg
 
 MOUSE_BUTTONS = ("left", "middle", "right", "none")
@@ -48,19 +56,39 @@ class BrowserTabMixin:
     def _browser_activate(self):
         """Choosing the tab opens the selected agent's browser in the chosen placement: the one
         already open there is kept as it is, otherwise it starts at that agent's remembered
-        address (or blank)."""
+        address (or blank). A browser open in the other placement is closed first."""
         context, why = self._browser_context()
         if context is None:
             self.status = why
             return
-        status = self.placed.open(context, self.browser_placement)
-        owner = self.placed.owner()
-        shared = self.placed.same_address(context, context["url"]) if owner and owner["id"] == context["id"] else []
+        ended = ""
+        if self.browser_placement == "embedded":
+            if self.placed.record is not None:
+                ended = self.placed.close()
+                if self.placed.record is not None:
+                    self.status = ended
+                    return
+        else:
+            self.browser.close()  # also drops an in-tab start still waiting for the terminal
+        context, _ = self._browser_context()  # the address the closed browser was just at
+        if self.browser_placement == "embedded":
+            refusal = self.browser.open(context)
+            status, opened = refusal or ended, not refusal
+        else:
+            status = self.placed.open(context)
+            owner = self.placed.owner()
+            opened = bool(owner) and owner["id"] == context["id"]
+        shared = self.placed.same_address(context, context["url"]) if opened else []
         self.status = f"! same address as {who(shared[0])}: one server for both" if shared else status
+
+    def _browser_shows(self, context):
+        owner = self.browser.owner()
+        return owner is not None and context is not None and owner["id"] == context["id"]
 
     # ---- body --------------------------------------------------------------------------
     def _browser_bar(self):
-        """The last action's outcome, a kept direct pick, or a capture in progress."""
+        """The last action's outcome, a kept direct pick, a capture in progress, and inside
+        Firstpane a browser state other than running on the fast path."""
         parts = []
         if self.status and self.status != NO_GRAPHICS:
             parts.append(self.status)
@@ -69,29 +97,47 @@ class BrowserTabMixin:
             parts.append(f"context kept: {kept}; m previews")
         if self.capture_job is not None:
             parts.append("capturing…")
+        if self.browser_placement == "embedded":
+            described = self.browser.describe()
+            if described != "running" and not self.status:
+                parts.append(described)
         return " · ".join(sanitize(part) for part in parts)
 
     def _browser_body(self, plain, budget):
         lines = []
-        width = max(1, self.cols - 1)
-        for text, sgr in ((self._browser_bar(), INK), (sanitize(self.placed.describe()), INK),
-                          (f"opens in: {PLACEMENT_LABELS[self.browser_placement]} (6 Settings) \u00b7 f brings it forward"
-                           " \u00b7 a captures the page \u00b7 x closes it", MUTED)):
-            lines += [(" " + paint(part, rgb_fg(sgr), plain), None) for part in (word_wrap(text, width) if text else [])]
+        embedded = self.browser_placement == "embedded"
+        bar = self._browser_bar()
+        if embedded:
+            # One line at most: every change of the page's rows resizes the image.
+            lines += [(" " + paint(bar, rgb_fg(INK), plain), None)] if bar else []
+        else:
+            for text, sgr in ((bar, INK), (sanitize(self.placed.describe()), INK),
+                              (f"opens in: {PLACEMENT_LABELS[self.browser_placement]} (6 Settings) \u00b7 f brings it forward"
+                               " \u00b7 a captures the page \u00b7 x closes it", MUTED)):
+                lines += [(" " + paint(part, rgb_fg(sgr), plain), None) for part in (word_wrap(text, max(1, self.cols - 1)) if text else [])]
         anchor = (self.draft or {}).get("anchor") or {}
         if self.draft is not None and anchor.get("kind") == "browser" and not anchor.get("direct"):
             lines += self._inline_rows(self.draft, plain, 1)
+        if embedded:
+            rows = max(1, budget - len(lines))
+            cols = max(1, self.cols - IMAGE_COLUMN + 1)
+            self.browser.set_region(rows, cols)
+            image = self.browser.body_lines(rows, cols)
+            lines += [(" " * (IMAGE_COLUMN - 1) + row, {"kind": "browser", "row": index}) for index, row in enumerate(image)]
         return [text for text, _ in lines], [hit for _, hit in lines]
 
     # ---- keys --------------------------------------------------------------------------
     def _browser_list_key(self, key):
         if key in ("f", "enter"):
-            context, why = self._browser_context()
-            self.status = self.placed.focus(context) if context else why
+            if self.browser_placement == "embedded":
+                self._give_page_keyboard()
+            else:
+                context, why = self._browser_context()
+                self.status = self.placed.focus(context) if context else why
         elif key in ("a", "ctrl-g"):
             self._start_capture()
         elif key == "x":
-            self.status = self.placed.close()
+            self.status = self.browser.close() if self.browser.running else self.placed.close()
         elif key == "m":
             if self._direct_pick_waiting():
                 self.composer.set(self.draft.get("body") or "")
@@ -104,6 +150,17 @@ class BrowserTabMixin:
         else:
             return False
         return True
+
+    def _give_page_keyboard(self):
+        context, why = self._browser_context()
+        if context is None:
+            self.status = why
+        elif not self._browser_shows(context):
+            self.status = "no browser in this tab yet; choose the Browser tab (3) to start it"
+        elif self.browser.grid is None:
+            self.status = "the page is still starting"
+        else:
+            self.focus = "browser"
 
     def _browser_key(self, key):
         if key == "ctrl-o" or not self.browser.running or self.browser.grid is None:
@@ -155,23 +212,27 @@ class BrowserTabMixin:
             return
         self.capture_for = (context["id"], self._agent_target())
         self.capture_pick = pick
-        self.capture_job = self.submit(lambda: self.placed.capture(context))
+        page = self.browser if self.browser.running else self.placed
+        self.capture_job = self.submit(lambda: page.capture(context))
         self._poll_capture()
 
     def _capture_context(self):
-        """(the selected agent's context, None) while this tab shows its browser, else (None, why)."""
+        """(the selected agent's context, None) while its browser is open, else (None, why)."""
         if self.capture_job is not None:
             return None, "capture refused: the last capture is still running"
         context, why = self._browser_context()
         if context is None:
             return None, "capture refused: " + why
-        self.placed.refresh()
-        owner = self.placed.owner()
-        if owner is None or self.placed.state != "open":
+        self.browser.refresh()
+        if self.browser.running:
+            owner, where = self.browser.owner(), "this tab"
+        else:
+            self.placed.refresh()
+            owner, where = (self.placed.owner() if self.placed.state == "open" else None), self.placed.where()
+        if owner is None:
             return None, "capture refused: no open browser from this Firstpane"
         if owner["id"] != context["id"]:
-            return None, (f"capture refused: {self.placed.where()} shows {sanitize(who(owner))}'s browser, "
-                          f"not {sanitize(who(context))}'s")
+            return None, f"capture refused: {where} shows {sanitize(who(owner))}'s browser, not {sanitize(who(context))}'s"
         return context, None
 
     def _poll_capture(self):
@@ -285,7 +346,7 @@ class BrowserTabMixin:
         self._settle_icons()
         data = self.icons.pending(self.browser.cell) + self.browser.pump(ready, now)
         self.placed.pump(ready)
-        for pick in self.placed.take_picks():
+        for pick in self.browser.take_picks() + self.placed.take_picks():
             note = pick[2] if len(pick) > 2 else ""
             if note.strip() and self.screen.startswith("confirm-"):
                 self.placed.answer_pick(pick[0], False)

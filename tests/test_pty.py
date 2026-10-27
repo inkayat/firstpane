@@ -218,8 +218,6 @@ class PtyTests(unittest.TestCase):
         osascript = fake_bin / "osascript"
         osascript.write_text(FAKE_OSASCRIPT.format(python=sys.executable, log=str(self.osascript_log)))
         osascript.chmod(0o755)
-        self.own = {"pane_id": "w9:p9", "terminal_id": "term_fp", "tab_id": "w9:t1", "workspace_id": "w9"}
-        self.herdr.state["panes"]["w9:p9"] = dict(self.own)
         self.env = dict(self.fx.env)
         self.env.update(
             PATH=f"{fake_bin}:{self.fx.env['PATH']}",
@@ -232,16 +230,10 @@ class PtyTests(unittest.TestCase):
             PYTHONDONTWRITEBYTECODE="1",
         )
         self.panes = []
-        self.spawned = []
 
     def tearDown(self):
         for item in self.panes:
             item.close()
-        for pid in self.spawned:
-            try:
-                os.killpg(pid, signal.SIGKILL)
-            except OSError:
-                pass
         self.stop_browser()
         self.herdr.close()
         remove_launch_runtimes(self.tmp)
@@ -344,43 +336,17 @@ class PtyTests(unittest.TestCase):
         self.assertEqual(index_after, index_before)
         self.assertNotIn("pane.focus", self.herdr.calls)
 
-    def serve_panes(self):
-        """Herdr's pane split as the beside placement uses it: the split pane's shell really
-        runs the typed text."""
-        shells = {}
-
-        def split(params):
-            pane_id = f"w9:p{10 + len(shells)}"
-            row = {"pane_id": pane_id, "terminal_id": f"term_{pane_id}", "tab_id": "w9:t1", "workspace_id": "w9"}
-            self.herdr.state["panes"][pane_id] = row
-            shells[pane_id] = None
-            return {"type": "pane_info", "pane": dict(row)}
-
-        def send_input(params):
-            proc = subprocess.Popen(["/bin/sh", "-c", params["text"]], start_new_session=True,
-                                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            self.spawned.append(proc.pid)
-            shells[params["pane_id"]] = proc.pid
-            return {"type": "ok"}
-
-        def process_info(params):
-            return {"type": "pane_process_info", "process_info": {
-                "pane_id": params["pane_id"], "shell_pid": shells.get(params["pane_id"]), "foreground_processes": []}}
-
-        self.herdr.handlers.update({"pane.split": split, "pane.send_input": send_input, "pane.process_info": process_info})
-
     def osascript_calls(self):
         if not self.osascript_log.exists():
             return []
         return [json.loads(line) for line in self.osascript_log.read_text().splitlines()]
 
-    def test_settings_keys_and_clicks_choose_beside_which_the_browser_tab_and_a_restart_honour(self):
+    def test_settings_keys_and_clicks_choose_inside_firstpane_which_the_browser_tab_and_a_restart_honour(self):
         # Break: on the real entrypoint `6`, j/Enter or a click do not reach the Settings tab,
-        # the choice is not kept across a restart, the Browser tab still opens a Ghostty tab
-        # (or draws the page in the tab) with Beside chosen, or a restarted Firstpane splits a
-        # second pane next to the browser it already opened.
+        # the choice is not kept across a restart, the Browser tab still opens a Ghostty tab or a
+        # Herdr pane with Inside Firstpane chosen, the browser is not Firstpane's own child
+        # (it would outlive Firstpane), or it misses the embed host it draws through.
         out = self.configure_browser()
-        self.serve_panes()
         term = self.open()
         term.wait_for(lambda s: "Pty task" in s.text())
         term.send(b"\r")
@@ -389,35 +355,92 @@ class PtyTests(unittest.TestCase):
         self.assertIn("Settings", term.screen.lines()[0])
         term.send(b"j")
         term.send(b"\r")
-        term.wait_for(lambda s: "(\u2022) Beside Firstpane" in s.text() and "saved" in s.text())
+        term.wait_for(lambda s: "(\u2022) Inside Firstpane" in s.text() and "saved" in s.text())
         row = self.row_of(term.screen, "Ghostty tab")
         column = term.screen.lines()[row - 1].index("Ghostty") + 1
         term.send(f"\x1b[<0;{column};{row}M\x1b[<0;{column};{row}m".encode())
         term.wait_for(lambda s: "(\u2022) Ghostty tab" in s.text())
-        row = self.row_of(term.screen, "Beside Firstpane")
-        column = term.screen.lines()[row - 1].index("Beside") + 1
+        row = self.row_of(term.screen, "Inside Firstpane")
+        column = term.screen.lines()[row - 1].index("Inside") + 1
         term.send(f"\x1b[<0;{column};{row}M\x1b[<0;{column};{row}m".encode())
-        term.wait_for(lambda s: "(\u2022) Beside Firstpane" in s.text())
+        term.wait_for(lambda s: "(\u2022) Inside Firstpane" in s.text())
         term.send(b"3")
         run = self.wait_file(out, term)
-        term.wait_for(lambda s: "beside Firstpane" in s.text())
-        self.assertNotIn("\U0010EEEE", term.screen.text())
-        split = [r["params"] for r in self.herdr.requests if r["method"] == "pane.split"]
-        self.assertEqual(len(split), 1)
-        self.assertEqual((split[0]["target_pane_id"], split[0]["direction"], split[0]["focus"]), ("w9:p9", "right", False))
+        parent = subprocess.run(["ps", "-o", "ppid=", "-p", str(run["pid"])], capture_output=True, text=True).stdout.strip()
+        self.assertEqual(parent, str(term.pid))
+        self.assertTrue(run["env"]["PIXEL_EMBED"])
         self.assertEqual(self.osascript_calls(), [])
+        self.assertNotIn("pane.split", self.herdr.calls)
         self.assertFalse([name for name in run["env"] if name.startswith("HERDR_")])
         self.assertNotEqual(run["env"]["HOME"], self.env.get("HOME"))
         term.send(b"\x03")
         self.assertEqual(term.exit_code(), 0)
-        os.kill(run["pid"], 0)  # the pane beside Firstpane is not Firstpane's child: it stays
+        deadline = time.time() + 10
+        while time.time() < deadline and subprocess.run(["ps", "-p", str(run["pid"])], capture_output=True).returncode == 0:
+            time.sleep(0.05)
+        self.assertNotEqual(subprocess.run(["ps", "-p", str(run["pid"])], capture_output=True).returncode, 0)
+        out.unlink()
         again = self.open()
-        again.wait_for(lambda s: "beside Firstpane" in s.text())
+        again.wait_for(lambda s: "pty-task" in s.text())
         again.send(b"6")
-        again.wait_for(lambda s: "(\u2022) Beside Firstpane" in s.text())
+        again.wait_for(lambda s: "(\u2022) Inside Firstpane" in s.text())
         again.send(b"3")
-        again.wait_for(lambda s: "beside Firstpane" in s.text())
-        self.assertEqual(len([r for r in self.herdr.requests if r["method"] == "pane.split"]), 1)
+        self.assertTrue(self.wait_file(out, again)["env"]["PIXEL_EMBED"])
+        self.assertEqual(self.osascript_calls(), [])
+
+    def test_hiding_a_tab_in_settings_removes_it_from_the_row_and_survives_a_restart(self):
+        # Break: on the real entrypoint a click on a tab row does not hide it, the hidden tab's
+        # number key still opens it, or a restarted Firstpane shows it again.
+        term = self.open()
+        term.wait_for(lambda s: "Pty task" in s.text())
+        term.send(b"6")
+        term.wait_for(lambda s: "[x] Board" in s.text())
+        row = self.row_of(term.screen, "[x] Board")
+        column = term.screen.lines()[row - 1].index("[x]") + 1
+        term.send(f"\x1b[<0;{column};{row}M\x1b[<0;{column};{row}m".encode())
+        term.wait_for(lambda s: "[ ] Board" in s.text() and "Board" not in s.lines()[0])
+        term.send(b"5")
+        term.wait_for(lambda s: "Board is hidden" in s.text())
+        self.assertIn("[ ] Board", term.screen.text())
+        term.send(b"\x03")
+        self.assertEqual(term.exit_code(), 0)
+        again = self.open()
+        again.wait_for(lambda s: "[ ] Board" in s.text())
+        self.assertNotIn("Board", again.screen.lines()[0])
+        self.assertIn("Settings", again.screen.lines()[0])
+
+    def click_row(self, term, needle):
+        row = self.row_of(term.screen, needle)
+        column = term.screen.lines()[row - 1].index(needle) + 1
+        term.send(f"\x1b[<0;{column};{row}M\x1b[<0;{column};{row}m".encode())
+
+    def test_hiding_settings_and_every_other_tab_leaves_key_six_as_the_way_back_across_a_restart(self):
+        # Break: on the real entrypoint a hidden Settings is unreachable (no key 6, or a restart
+        # lands on a tab with no entry), hidden tabs still open from their number keys, or the
+        # tabs cannot be shown again from there.
+        term = self.open()
+        term.wait_for(lambda s: "Pty task" in s.text())
+        term.send(b"6")
+        term.wait_for(lambda s: "[x] Settings" in s.text())
+        for label in ("Agents", "Changes", "Browser", "Pull Requests", "Board", "Settings"):
+            self.click_row(term, f"[x] {label}")
+            term.wait_for(lambda s, label=label: f"[ ] {label}" in s.text())
+        term.wait_for(lambda s: s.lines()[0].strip() == "")
+        term.send(b"3")
+        term.wait_for(lambda s: "Browser is hidden" in s.text())
+        self.assertIn("Browser placement", term.screen.text())
+        term.send(b"\x03")
+        self.assertEqual(term.exit_code(), 0)
+        again = self.open()
+        again.wait_for(lambda s: "[ ] Settings" in s.text())
+        self.assertEqual(again.screen.lines()[0].strip(), "")
+        self.click_row(again, "[ ] Agents")
+        again.wait_for(lambda s: "Agents" in s.lines()[0] and "Settings" not in s.lines()[0])
+        again.send(b"1")
+        again.wait_for(lambda s: "Pty task" in s.text())
+        again.send(b"6")
+        again.wait_for(lambda s: "Browser placement" in s.text())
+        self.assertNotIn("Settings", again.screen.lines()[0])
 
     @unittest.skipUnless(sys.platform == "darwin", "the Ghostty tab placement is macOS-only; see the next test")
     def test_the_default_placement_opens_one_ghostty_tab_on_the_real_entrypoint(self):
@@ -445,15 +468,15 @@ class PtyTests(unittest.TestCase):
         self.assertEqual(term.exit_code(), 0)
 
     @unittest.skipIf(sys.platform == "darwin", "this host supports the Ghostty tab placement; see the previous test")
-    def test_off_macos_the_default_placement_says_to_choose_beside_and_opens_nothing(self):
-        # Break: on Linux the real entrypoint calls osascript anyway, opens a pane instead without
-        # being asked, or leaves the tab silent about why no browser opened.
+    def test_off_macos_the_default_placement_says_to_choose_inside_firstpane_and_opens_nothing(self):
+        # Break: on Linux the real entrypoint calls osascript anyway, starts the in-tab browser
+        # without being asked, or leaves the tab silent about why no browser opened.
         out = self.configure_browser()
         term = self.open()
         term.wait_for(lambda s: "Pty task" in s.text())
         term.send(b"\r")
         term.send(b"3")
-        term.wait_for(lambda s: "needs macOS" in s.text())
+        term.wait_for(lambda s: "needs macOS" in s.text() and "Inside Firstpane" in s.text())
         self.assertEqual(self.osascript_calls(), [])
         self.assertNotIn("pane.split", self.herdr.calls)
         self.assertFalse(out.exists())

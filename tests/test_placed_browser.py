@@ -1,10 +1,10 @@
-"""The Browser tab's browser outside the tab: a new tab in the front Ghostty window, or a Herdr pane
-beside Firstpane (the placement chosen in Settings).
+"""The Browser tab's browser outside Firstpane: a new tab in the front Ghostty window (the Ghostty
+tab placement chosen in Settings).
 
-Each test names the production break it exists to catch. Herdr is a fake socket API and Ghostty
-is a fake `osascript` at the transport boundary; the launcher really runs (through /bin/sh, as
-the pane's shell or Ghostty's command would) with a fake terminal-browser that keeps running
-until it is told to stop. No real Ghostty window or tab, Herdr pane or browser is touched.
+Each test names the production break it exists to catch. Ghostty is a fake `osascript` at the
+transport boundary; the launcher really runs (through /bin/sh, as Ghostty's command would) with
+a fake terminal-browser that keeps running until it is told to stop. No real Ghostty window or
+tab, Herdr pane or browser is touched.
 """
 
 import json
@@ -23,8 +23,8 @@ from firstpane.embed import CaptureError
 from firstpane.placed import LAUNCHER, START_TIMEOUT, PlacedBrowser
 from tests.support import Clock, CmdResult, ghostty_argv, remove_launch_runtimes
 
-# Like terminal-browser 0.13.4, the command started in the window or pane keeps a browser process
-# that runs in a session of its own: it outlives the command when only the command is signalled.
+# Like terminal-browser 0.13.4, the command started in the tab keeps a browser process that runs
+# in a session of its own: it outlives the command when only the command is signalled.
 FAKE_TB = """#!{python}
 import json, os, signal, subprocess, sys, time
 signal.signal(signal.SIGTERM, lambda *_: os._exit(0))
@@ -42,7 +42,7 @@ def _running(pid):
 
 
 class FakeHost:
-    """Herdr's pane API over an in-memory layout, and Ghostty's AppleScript at `osascript`.
+    """Ghostty's AppleScript at `osascript`.
 
     Ghostty has one host window "HW-1" holding a sentinel tab "HT-1" (the user's own tab). A
     Ghostty `new tab in` adds a tab to the window whose id the script was given, or to the front
@@ -55,13 +55,7 @@ class FakeHost:
     opened)."""
 
     def __init__(self):
-        self.calls = []
         self.runs = []
-        self.panes = {"w1:p1": {"pane_id": "w1:p1", "terminal_id": "term_fp", "tab_id": "w1:t1", "workspace_id": "w1"}}
-        self.shell_pids = {}
-        self.typed = {}
-        self.next = 2
-        self.split_tab = "w1:t1"
         self.ghostty_answer = "ok"
         self.frontmost = True
         self.front = "HW-1"
@@ -70,36 +64,6 @@ class FakeHost:
         self.focused = []
         self.procs = []
         self.closed = []
-
-    # ---- Herdr ---------------------------------------------------------------------
-    def socket_call(self, method, params, timeout):
-        self.calls.append((method, dict(params)))
-        pane_id = params.get("pane_id")
-        if method == "pane.split":
-            new = f"w1:p{self.next}"
-            self.next += 1
-            pane = {"pane_id": new, "terminal_id": f"term_{new}", "tab_id": self.split_tab, "workspace_id": "w1"}
-            self.panes[new] = pane
-            return {"id": "t", "result": {"type": "pane_info", "pane": dict(pane)}}
-        if pane_id not in self.panes:
-            return {"id": "t", "error": {"code": "pane_not_found", "message": "missing"}}
-        if method == "pane.get":
-            return {"id": "t", "result": {"type": "pane_info", "pane": dict(self.panes[pane_id])}}
-        if method == "pane.send_input":
-            self.typed[pane_id] = params.get("text")
-            return {"id": "t", "result": {"type": "ok"}}
-        if method == "pane.process_info":
-            return {"id": "t", "result": {"type": "pane_process_info", "process_info": {
-                "pane_id": pane_id, "shell_pid": self.shell_pids.get(pane_id), "foreground_processes": []}}}
-        if method == "pane.focus":
-            return {"id": "t", "result": {"type": "pane_focused", "pane_id": pane_id}}
-        if method == "pane.close":
-            del self.panes[pane_id]
-            return {"id": "t", "result": {"type": "ok"}}
-        raise AssertionError("unexpected method " + method)
-
-    def methods(self):
-        return [method for method, _ in self.calls]
 
     # ---- Ghostty ---------------------------------------------------------------------
     def run(self, argv, stdin=None, env=None, timeout=None, cwd=None, detach=False):
@@ -181,8 +145,8 @@ class PlacedBrowserTests(unittest.TestCase):
         self.profile = self.root / "state" / "browser" / "w1-p1"
         self.clock = Clock()
 
-    def browser(self, own="w1:p1", root=None, platform="darwin"):
-        item = PlacedBrowser(str(self.tb) if root is None else root, self.profile, own, self.host,
+    def browser(self, root=None, platform="darwin"):
+        item = PlacedBrowser(str(self.tb) if root is None else root, self.profile, self.host,
                              env={"LANG": "tr_TR.UTF-8", "HOME": "/personal/home"}, clock=self.clock,
                              platform=platform)
         self.addCleanup(item.release)
@@ -193,18 +157,6 @@ class PlacedBrowserTests(unittest.TestCase):
 
     def beta(self, browser):
         return browser.context(("fm", "beta-task"), "beta-task", "/src/wt-b")
-
-    def run_pane(self, pane_id):
-        """Be the new pane's shell: run exactly the typed text, with a Herdr pane environment."""
-        self.out.unlink(missing_ok=True)
-        env = {"PATH": "/usr/bin:/bin", "HOME": "/personal/home", "HERDR_PANE_ID": pane_id,
-               "HERDR_SOCKET_PATH": "/x/herdr.sock", "HERDR_ENV": "1", "TERM_PROGRAM": "ghostty", "KITTY_WINDOW_ID": "3"}
-        proc = subprocess.Popen(["/bin/sh", "-c", self.host.typed[pane_id]], env=env, cwd=self.tmp.name,
-                                start_new_session=True)
-        self.host.procs.append(proc)
-        self.host.shell_pids[pane_id] = proc.pid
-        self.wait_run()
-        return proc.pid
 
     def wait_run(self):
         deadline = time.time() + 20
@@ -235,20 +187,11 @@ class PlacedBrowserTests(unittest.TestCase):
             time.sleep(0.02)
         raise AssertionError(f"never open: {browser.state} {browser.describe()}")
 
-    def beside(self, context=None, browser=None):
-        browser = browser or self.browser()
-        context = context or self.alpha(browser)
-        status = browser.open(context, "beside")
-        pane_id = browser.record["pane_id"]
-        pid = self.run_pane(pane_id)
-        browser.refresh()
-        return browser, status, pane_id, pid
-
     def native(self, context=None, browser=None):
         browser = browser or self.browser()
         context = context or self.alpha(browser)
         self.out.unlink(missing_ok=True)
-        status = browser.open(context, "ghostty")
+        status = browser.open(context)
         run = self.wait_run()
         self.wait_open(browser)
         return browser, status, run
@@ -287,7 +230,7 @@ class PlacedBrowserTests(unittest.TestCase):
         self.page_at(browser, self.URL)
         browser.close()
         self.out.unlink()
-        status = browser.open(self.alpha(browser), "ghostty")
+        status = browser.open(self.alpha(browser))
         self.wait_run()
         tabs = self.host.new_tabs()
         self.assertEqual(len(tabs), 2)
@@ -330,7 +273,7 @@ class PlacedBrowserTests(unittest.TestCase):
         # Break: every Browser-tab visit adds another Ghostty tab (and Chromium) on the same
         # profile, or `f` focuses some other Ghostty terminal.
         browser, _, run = self.native()
-        status = browser.open(self.alpha(browser), "ghostty")
+        status = browser.open(self.alpha(browser))
         self.assertIn("Ghostty tab", status)
         self.assertEqual(len(self.host.new_tabs()), 1)
         self.assertEqual(browser.record["pid"], run["pid"])
@@ -342,17 +285,17 @@ class PlacedBrowserTests(unittest.TestCase):
         # Ghostty already opened the tab, and the next open asks for a second one.
         self.host.ghostty_answer = "error-after-window"
         browser = self.browser()
-        status = browser.open(self.alpha(browser), "ghostty")
+        status = browser.open(self.alpha(browser))
         self.assertIn("not confirmed", status)
-        again = browser.open(self.alpha(browser), "ghostty")
+        again = browser.open(self.alpha(browser))
         self.assertIn("starting", again)
-        refused = browser.open(self.beta(browser), "ghostty")
+        refused = browser.open(self.beta(browser))
         self.assertIn("busy", refused)
         self.assertEqual(len(self.host.new_tabs()), 1)
         run = self.wait_run()
         self.wait_open(browser)
         self.assertEqual(browser.record["pid"], run["pid"])
-        browser.open(self.alpha(browser), "ghostty")
+        browser.open(self.alpha(browser))
         self.assertEqual(len(self.host.new_tabs()), 1)
         self.assertIn("cannot bring", browser.focus(self.alpha(browser)))
         status = browser.close()
@@ -367,15 +310,15 @@ class PlacedBrowserTests(unittest.TestCase):
         # or a refusal leaves a record that blocks the next open.
         browser = self.browser()
         self.host.frontmost = False
-        status = browser.open(self.alpha(browser), "ghostty")
+        status = browser.open(self.alpha(browser))
         self.assertIn("not the front application", status)
-        self.assertIn("Beside Firstpane", status)
+        self.assertIn("Inside Firstpane", status)
         self.host.frontmost, self.host.front = True, None
-        self.assertIn("no window", browser.open(self.alpha(browser), "ghostty"))
+        self.assertIn("no window", browser.open(self.alpha(browser)))
         self.assertIsNone(browser.record)
         self.assertEqual(self.host.tabs, [])
         self.host.front = "HW-1"
-        browser.open(self.alpha(browser), "ghostty")
+        browser.open(self.alpha(browser))
         self.wait_run()
         self.wait_open(browser)
         self.assertEqual(self.host.host_tabs, {"HW-1": ["HT-1", "HT-2"]})
@@ -386,7 +329,7 @@ class PlacedBrowserTests(unittest.TestCase):
         browser = self.browser()
         self.host.host_tabs["HW-2"] = ["HT-9"]
         browser.ghostty_window = "HW-2"
-        browser.open(self.alpha(browser), "ghostty")
+        browser.open(self.alpha(browser))
         self.wait_run()
         self.wait_open(browser)
         self.assertEqual(self.host.host_tabs, {"HW-1": ["HT-1"], "HW-2": ["HT-9", "HT-2"]})
@@ -394,7 +337,7 @@ class PlacedBrowserTests(unittest.TestCase):
         browser.close()
         self.assertEqual(self.host.host_tabs, {"HW-1": ["HT-1"], "HW-2": ["HT-9"]})
         browser.ghostty_window = "HW-3"
-        status = browser.open(self.alpha(browser), "ghostty")
+        status = browser.open(self.alpha(browser))
         self.assertIn("no window HW-3", status)
         self.assertIsNone(browser.record)
         self.assertEqual(self.host.host_tabs, {"HW-1": ["HT-1"], "HW-2": ["HT-9"]})
@@ -404,15 +347,15 @@ class PlacedBrowserTests(unittest.TestCase):
         # at once (racing a tab that may still come up).
         self.host.ghostty_answer = "error"
         browser = self.browser()
-        browser.open(self.alpha(browser), "ghostty")
-        self.assertIn("busy", browser.open(self.beta(browser), "ghostty"))
+        browser.open(self.alpha(browser))
+        self.assertIn("busy", browser.open(self.beta(browser)))
         self.clock.t += START_TIMEOUT + 1
         browser.refresh()
         self.assertEqual(browser.state, "failed")
         self.assertIn("did not start", browser.describe())
         self.host.ghostty_answer = "ok"
         self.out.unlink(missing_ok=True)
-        browser.open(self.alpha(browser), "ghostty")
+        browser.open(self.alpha(browser))
         self.wait_run()
         self.wait_open(browser)
         self.assertEqual(len(self.host.new_tabs()), 2)
@@ -421,14 +364,14 @@ class PlacedBrowserTests(unittest.TestCase):
         # Break: on Linux Firstpane tries AppleScript anyway, or a missing osascript leaves a
         # record that blocks every later open.
         browser = self.browser(platform="linux")
-        status = browser.open(self.alpha(browser), "ghostty")
+        status = browser.open(self.alpha(browser))
         self.assertIn("macOS", status)
-        self.assertIn("Beside Firstpane", status)
+        self.assertIn("Inside Firstpane", status)
         self.assertEqual(self.host.runs, [])
         self.assertIsNone(browser.record)
         mac = self.browser()
         self.host.run = lambda argv, **kwargs: CmdResult(127, "", "[Errno 2] No such file or directory: 'osascript'")
-        status = mac.open(self.alpha(mac), "ghostty")
+        status = mac.open(self.alpha(mac))
         self.assertIn("osascript", status)
         self.assertIsNone(mac.record)
         self.assertEqual(mac.state, "failed")
@@ -455,7 +398,7 @@ class PlacedBrowserTests(unittest.TestCase):
         self.assertTrue((self.profile / "contexts" / self.alpha(browser)["id"] / "tbconfig" / "settings.json").exists())
         self.assertIsNone(browser.record)
         self.out.unlink()
-        browser.open(self.alpha(browser), "ghostty")
+        browser.open(self.alpha(browser))
         self.assertEqual(self.spec(browser)["url"], "http://127.0.0.1:8001/app")
 
     def test_a_tab_the_user_closed_is_forgotten_and_a_reused_pid_is_never_adopted(self):
@@ -485,21 +428,12 @@ class PlacedBrowserTests(unittest.TestCase):
         browser, _, first = self.native()
         self.page_at(browser, "http://127.0.0.1:8001/app")
         self.out.unlink()
-        browser.open(self.beta(browser), "ghostty")
+        browser.open(self.beta(browser))
         second = self.wait_run()
         self.assertTrue(self.wait_dead(first["pid"]))
         self.assertTrue(second["env"]["HOME"].startswith(str(self.profile / "contexts" / self.beta(browser)["id"])))
         self.assertEqual(self.alpha(browser)["url"], "http://127.0.0.1:8001/app")
         self.assertEqual(browser.owner()["label"], "beta-task")
-
-    def test_changing_the_placement_moves_the_context_without_two_browsers_on_one_profile(self):
-        # Break: the beside pane opens while the native window of the same profile still runs
-        # (two Chromium instances on one profile), or the native one is left behind.
-        browser, _, run = self.native()
-        browser.open(self.alpha(browser), "beside")
-        self.assertTrue(self.wait_dead(run["pid"]))
-        self.assertEqual(browser.record["placement"], "beside")
-        self.assertEqual(self.host.methods().count("pane.split"), 1)
 
     def test_a_restarted_firstpane_reuses_the_proven_native_tab_and_says_its_select_tool_is_unlinked(self):
         # Break: restarting Firstpane opens a duplicate window, or claims the select tool still
@@ -509,7 +443,7 @@ class PlacedBrowserTests(unittest.TestCase):
         again.refresh()
         self.assertEqual(again.state, "open")
         self.assertIn("select tool", again.describe())
-        again.open(self.alpha(again), "ghostty")
+        again.open(self.alpha(again))
         self.assertEqual(len(self.host.new_tabs()), 1)
         self.assertEqual(again.record["pid"], run["pid"])
 
@@ -569,120 +503,27 @@ class PlacedBrowserTests(unittest.TestCase):
         self.assertEqual(seen["root"], os.path.realpath(self.tb))
         self.assertEqual(seen["env"]["HOME"], run["env"]["HOME"])
 
-    # ---- beside Firstpane (the pre-embedding Herdr pane) -------------------------------
-    def test_beside_splits_this_pane_right_without_focus_and_types_only_the_fixed_launcher(self):
-        # Break: the browser opens in another tab or steals focus, or a remembered address is
-        # typed into a shell where it can run code.
-        browser, _, first, _ = self.beside()
-        self.page_at(browser, self.URL)
-        browser.close()
-        status = browser.open(self.alpha(browser), "beside")
-        split = [params for method, params in self.host.calls if method == "pane.split"]
-        self.assertEqual(len(split), 2)
-        self.assertEqual((split[1]["target_pane_id"], split[1]["direction"], split[1]["focus"]), ("w1:p1", "right", False))
-        pane_id = browser.record["pane_id"]
-        self.assertIn(pane_id, status)
-        typed = self.host.typed[pane_id]
-        self.assertEqual(shlex.split(typed), ["exec", sys.executable, "-I", "-B", str(LAUNCHER), browser.record["spec"]])
-        self.assertNotIn("pwned", typed)
-        self.assertEqual(self.spec(browser)["url"], self.URL)
-        send = [params for method, params in self.host.calls if method == "pane.send_input"]
-        self.assertEqual(send[-1]["keys"], ["enter"])
+    def test_an_unconfigured_install_opens_no_tab(self):
+        # Break: a missing install is looked up on PATH, or a Ghostty tab is opened anyway.
+        browser = self.browser(root="")
+        self.assertIn("terminal_browser_root", browser.open(self.alpha(browser)))
+        self.assertEqual(self.host.runs, [])
 
-    def test_beside_runs_the_browser_in_its_private_profile_without_pane_variables(self):
-        # Break: the beside browser inherits HERDR_*/kitty/Ghostty variables or the personal HOME.
-        browser, _, _, pid = self.beside()
-        run = json.loads(self.out.read_text())
-        self.assertEqual(run["pid"], pid)
-        for name in run["env"]:
-            self.assertFalse(name.startswith(("HERDR_", "PIXEL_", "KITTY_", "GHOSTTY_")), name)
-        self.assertTrue(run["env"]["HOME"].startswith(str(self.profile / "contexts" / self.alpha(browser)["id"])))
-        self.assertEqual(browser.state, "open")
-
-    def test_beside_reuses_its_pane_and_replaces_it_only_for_another_context(self):
-        # Break: every Browser-tab visit adds a pane, or another context's browser reuses the
-        # previous profile or forgets its address.
-        browser, _, pane_id, _ = self.beside()
-        self.assertIn(pane_id, browser.open(self.alpha(browser), "beside"))
-        self.assertEqual(self.host.methods().count("pane.split"), 1)
-        self.page_at(browser, "http://127.0.0.1:8001/app")
-        browser.open(self.beta(browser), "beside")
-        self.assertEqual([p for m, p in self.host.calls if m == "pane.close"], [{"pane_id": pane_id}])
-        self.assertTrue(self.spec(browser)["env"]["HOME"].startswith(str(self.profile / "contexts" / self.beta(browser)["id"])))
-        self.assertEqual(self.alpha(browser)["url"], "http://127.0.0.1:8001/app")
-
-    def test_beside_never_adopts_a_replaced_pane_or_a_pane_running_something_else(self):
-        # Break: a pane that later got the same id (another agent's shell) is focused, captured
-        # from or closed as if it were the browser.
-        browser, _, pane_id, _ = self.beside()
-        self.host.shell_pids[pane_id] = os.getpid()
-        browser.refresh()
-        self.assertNotEqual(browser.state, "open")
-        with self.assertRaises(CaptureError):
-            browser.capture(self.alpha(browser))
-        self.host.panes[pane_id]["terminal_id"] = "term_someone_else"
-        browser.refresh()
-        self.assertEqual(browser.state, "closed")
-        self.assertIn("no browser", browser.focus(self.alpha(browser)))
-        self.assertIn("no browser", browser.close())
-        self.assertNotIn("pane.close", self.host.methods())
-        self.assertNotIn("pane.focus", self.host.methods())
-
-    def test_beside_with_herdr_unreachable_keeps_the_record_and_refuses_every_action(self):
-        # Break: one socket timeout is read as "pane closed" and the next open splits a second
-        # browser pane next to the live one.
-        browser, _, pane_id, _ = self.beside()
-        saved = (self.profile / "companion.json").read_text()
-        original = self.host.socket_call
-
-        def unreachable(method, params, timeout):
-            raise TimeoutError("slow")
-
-        self.host.socket_call = unreachable
-        browser.refresh()
-        self.assertEqual(browser.state, "unreachable")
-        for refused in (browser.focus(self.alpha(browser)), browser.close(),
-                        browser.open(self.alpha(browser), "beside"), browser.open(self.beta(browser), "ghostty")):
-            self.assertIn("unverified", refused)
-        self.assertEqual((self.profile / "companion.json").read_text(), saved)
-        self.assertEqual(self.host.new_tabs(), [])
-        self.host.socket_call = original
-        browser.refresh()
-        self.assertEqual(browser.state, "open")
-        self.assertIn(pane_id, browser.focus(self.alpha(browser)))
-
-    def test_beside_refuses_without_its_own_pane_and_a_split_outside_this_tab(self):
-        # Break: with no HERDR_PANE_ID the browser lands beside whatever has focus, or Firstpane
-        # types into a pane Herdr placed in another tab.
-        browser = self.browser(own=None)
-        self.assertIn("HERDR_PANE_ID", browser.open(self.alpha(browser), "beside"))
-        self.assertEqual(self.host.calls, [])
-        self.host.split_tab = "w1:t9"
-        other = self.browser()
-        status = other.open(self.alpha(other), "beside")
-        self.assertIn("refused", status)
-        self.assertNotIn("pane.send_input", self.host.methods())
-        self.assertNotIn("pane.close", self.host.methods())
-
-    def test_an_unconfigured_install_starts_nothing_in_either_placement(self):
-        # Break: a missing install is looked up on PATH, or a pane or window is opened anyway.
-        for placement in ("ghostty", "beside"):
-            browser = self.browser(root="")
-            self.assertIn("terminal_browser_root", browser.open(self.alpha(browser), placement))
-        self.assertEqual((self.host.calls, self.host.runs), ([], []))
-
-    def test_a_pre_embedding_beside_record_is_still_read_and_reproven(self):
-        # Break: a companion.json written by the earlier beside-only Firstpane (no placement
-        # field) is ignored, so the live pane is duplicated, or it is read as a native window.
-        browser, _, pane_id, _ = self.beside()
+    def test_a_record_of_a_browser_pane_beside_an_earlier_firstpane_is_never_taken_for_a_ghostty_tab(self):
+        # Break: after the upgrade a companion.json written for a Herdr pane beside Firstpane
+        # (by the beside placement, or by the first Firstpane, which wrote no placement) is
+        # read as a Ghostty tab, so `x` signals the browser running in that pane, or the
+        # upgrade fails to load.
+        _, _, run = self.native()
         record = json.loads((self.profile / "companion.json").read_text())
-        record.pop("placement")
-        (self.profile / "companion.json").write_text(json.dumps(record))
-        again = self.browser()
-        again.refresh()
-        self.assertEqual(again.state, "open")
-        self.assertIn(pane_id, again.open(self.alpha(again), "beside"))
-        self.assertEqual(self.host.methods().count("pane.split"), 1)
+        for legacy in (dict(record, placement="beside", pane_id="w1:p2"), {k: v for k, v in record.items() if k != "placement"}):
+            (self.profile / "companion.json").write_text(json.dumps(legacy))
+            again = self.browser()
+            again.refresh()
+            self.assertIsNone(again.owner())
+            self.assertIn("no browser", again.close())
+            self.assertTrue(self.alive(run["pid"]))
+        self.assertEqual(self.host.closed, [])
 
 
 if __name__ == "__main__":

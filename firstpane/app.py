@@ -35,6 +35,7 @@ from firstpane.scope import path_in_scope, scope_root
 from firstpane.sessionname import session_from_socket_path
 from firstpane.settings_view import SettingsMixin
 from firstpane.style import INK, MUTED, PINK, frame_lines, no_color, paint, rgb_fg
+from firstpane.tabs import TAB_LABELS, TAB_SHORT, TABS
 
 SNAPSHOT_TIMEOUT = 3
 CELL_QUERY = "\x1b[16t"
@@ -58,12 +59,6 @@ SNAPSHOT_FAILED = "snapshot failed"
 SOCKET_ERRORS = (TimeoutError, OSError, ConnectionError, ValueError)
 TERMINAL_OUTCOMES = ("posted", "queued", "already-sent")
 PR_FIELDS = ("pr_rows", "truncated", "choice", "fetched_at", "remote_loaded", "pr_reason", "pr_error")
-TABS = ("agents", "changes", "browser", "prs", "board", "settings")
-TAB_LABELS = {
-    "agents": "Agents", "changes": "Changes", "browser": "Browser", "prs": "Pull Requests", "board": "Board",
-    "settings": "Settings",
-}
-TAB_SHORT = {"agents": "Ag", "changes": "Ch", "browser": "Br", "prs": "PR", "board": "Bd", "settings": "Set"}
 TARGET_FIELDS = (
     "kind", "project_key", "project_label", "label", "harness", "status", "pane_id", "terminal_id",
     "workspace_id", "tab_id", "task_id", "focusable", "recorded", "herdr_checkout", "cwd_hint",
@@ -168,8 +163,7 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
         pane_slug = "".join(char if char.isalnum() else "-" for char in (config.herdr_pane_id or "pane"))
         browser_dir = self.state_dir / "browser" / pane_slug
         self.browser = Browser(getattr(config, "terminal_browser_root", None), browser_dir, env)
-        self.placed = PlacedBrowser(getattr(config, "terminal_browser_root", None), browser_dir, config.herdr_pane_id,
-                                    transport, env, clock=wall)
+        self.placed = PlacedBrowser(getattr(config, "terminal_browser_root", None), browser_dir, transport, env, clock=wall)
         self._init_prs()
         self._load_ui()
 
@@ -312,7 +306,7 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
         if gesture != "press":
             return
         self.changes_menu = None
-        if self.tab == "settings" and kind == "setting-choice":
+        if self.tab == "settings" and kind in ("setting-choice", "setting-tab"):
             self._settings_mouse(hit)
             return
         if self.tab == "board" and kind in ("board-filter", "board-done", "board-agent", "board-row", "board-card", "board-stop", "board-composer"):
@@ -418,6 +412,9 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
         self.pending["scroll"] = max(0, self.pending.get("scroll", 0) + step)
 
     def _set_tab(self, name):
+        if name in self.hidden_tabs and name != "settings":
+            self.status = f"{TAB_LABELS[name]} is hidden; show it in Settings (6)"
+            return
         if name != self.tab:
             self._close_inline()
             self.changes_menu = None
@@ -566,11 +563,12 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
 
     def _tab_row(self, plain):
         count = self._changed_count()
-        narrow = self.cols < 60 or sum(len(TAB_LABELS[name]) + 2 for name in TABS) + 4 > self.cols
+        visible = self._visible_tabs()
+        narrow = self.cols < 60 or sum(len(TAB_LABELS[name]) + 2 for name in visible) + 4 > self.cols
         parts = []
         spans = []
         column = 1
-        for name in TABS:
+        for name in visible:
             label = TAB_LABELS[name] if name == self.tab or not narrow else TAB_SHORT[name]
             if name == "changes" and count is not None:
                 label += ("" if label == TAB_SHORT[name] else " ") + str(count)
@@ -1753,10 +1751,11 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
         last = data.get("last_agent") or {}
         if isinstance(last, dict):
             self.last_agent = {key: tuple(value) for key, value in last.items() if isinstance(value, list)}
-        if data.get("tab") in TABS:
-            self.tab = data["tab"]
-            self._show_browser(self.tab == "browser")
         self._load_settings(data)
+        saved = data.get("tab")
+        if saved in TABS or self.tab in self.hidden_tabs:
+            self.tab = saved if saved in TABS and saved not in self.hidden_tabs else (self._visible_tabs() or ["settings"])[0]
+            self._show_browser(self.tab == "browser")
         if isinstance(data.get("board_project"), str):
             self.board_project = data["board_project"]
         if data.get("board_active") in ("all", "active"):
@@ -1794,6 +1793,7 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
             "board_selected": self.board_selected,
             "board_done_open": self.board_done_open,
             "browser_placement": self.browser_placement,
+            "hidden_tabs": [name for name in TABS if name in self.hidden_tabs],
         }
         temp = path.with_name(f".ui-state.{os.getpid()}.tmp")
         temp.write_text(json.dumps(payload))
