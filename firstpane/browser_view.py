@@ -42,7 +42,7 @@ class BrowserTabMixin:
         """(context, "") for the selected agent's browser, else (None, why there is none)."""
         target = self.target
         if not target:
-            return None, "no agent selected: select an agent on the Agents tab (1, then Enter); each agent has its own browser"
+            return None, "no agent selected: select an agent on the Agents tab, then press Enter; each agent has its own browser"
         info = self._ws_info(target)
         if info is None:
             return None, f"reading {target.get('label')}'s worktree…"
@@ -156,7 +156,7 @@ class BrowserTabMixin:
         if context is None:
             self.status = why
         elif not self._browser_shows(context):
-            self.status = "no browser in this tab yet; choose the Browser tab (3) to start it"
+            self.status = "no browser in this tab yet; choose the Browser tab to start it"
         elif self.browser.grid is None:
             self.status = "the page is still starting"
         else:

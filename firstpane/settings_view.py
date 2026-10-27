@@ -5,9 +5,10 @@ the Ghostty window in front (firstpane/placed.py), or inside Firstpane, drawn in
 itself (firstpane/browser.py). The choice is saved when it is made; a browser already open moves
 the next time the Browser tab opens it.
 
-Tabs shows or hides each tab in the tab row. Hiding only removes the tab from navigation (its row
-and its number key); its data and any browser it opened stay as they are. Key 6 opens Settings
-even while Settings is hidden, so a hidden tab can always be shown again.
+Tabs shows or hides each tab in the tab row. Hiding only removes the tab from navigation; its data
+and any browser it opened stay as they are. The row numbers the shown tabs 1, 2, 3... in their
+fixed order, and those numbers are the keys. Key 6 also opens a hidden Settings, so a hidden tab
+can always be shown again.
 """
 
 from firstpane.cells import fit
@@ -44,6 +45,14 @@ class SettingsMixin:
     def _visible_tabs(self):
         return [name for name in TABS if name not in self.hidden_tabs]
 
+    def _tab_for_number(self, key):
+        """The tab a number key opens: the shown tabs counted from 1. Key 6 is the one extra way
+        to a hidden Settings (it is never a shown tab's number then: at most five tabs are shown)."""
+        visible = self._visible_tabs()
+        if int(key) <= len(visible):
+            return visible[int(key) - 1]
+        return "settings" if key == "6" and "settings" in self.hidden_tabs else None
+
     def _settings_shown(self):
         """The cursor starts on the current choice."""
         self.settings_cursor = PLACEMENTS.index(self.browser_placement)
@@ -74,7 +83,7 @@ class SettingsMixin:
                     for part in word_wrap(text, max(1, self.cols - indent))]
 
         lines = [(" " + paint("Browser placement", rgb_fg(BRIGHT, bold=True), plain), None)]
-        lines += prose("Where the Browser tab (3) opens the selected agent's browser")
+        lines += prose("Where the Browser tab opens the selected agent's browser")
         lines.append(("", None))
         width = 2 + 4 + LABEL_WIDTH  # cursor, mark, label
         wide = self.cols >= 1 + width + 3 + max(len(note) for note in PLACEMENT_NOTES.values())
@@ -94,8 +103,8 @@ class SettingsMixin:
                 lines += [(text, hit) for text, _ in prose(note, indent=7)]
         lines.append(("", None))
         lines.append((" " + paint("Tabs", rgb_fg(BRIGHT, bold=True), plain), None))
-        lines += prose("Show or hide tabs in the tab row. A hidden tab keeps its data and its number key does nothing, "
-                       "except key 6, which always opens Settings")
+        lines += prose("Show or hide tabs in the tab row. The shown tabs are numbered from 1 and the number opens the "
+                       "tab; a hidden tab keeps its data. If Settings is hidden, key 6 still opens it")
         lines.append(("", None))
         for index, name in enumerate(TABS, start=len(PLACEMENTS)):
             hit = {"kind": "setting-tab", "value": name}

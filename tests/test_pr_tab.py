@@ -12,7 +12,8 @@ from tests.support import CmdResult, agent_for, pane, selected_line, snapshot, w
 from tests.test_behavior import AppFixture, strip_sgr
 
 def active_tab(frame):
-    match = re.search(r"\x1b\[1;4(?:;[0-9;]+)?m(.*?)\x1b\[0m", frame.splitlines()[0])
+    """The underlined tab in the tab row, without its number."""
+    match = re.search(r"\x1b\[1;4(?:;[0-9;]+)?m\d (.*?)\x1b\[0m", frame.splitlines()[0])
     return match.group(1) if match else None
 
 
@@ -302,7 +303,7 @@ class PullRequestTabTests(InventoryFixture):
         app = self.app()
         app.refresh(manual=True)
         self.assertEqual(strip_sgr(app.render()).splitlines()[0].split(),
-                         ["Agents", "Changes", "Browser", "Pull", "Requests", "Board", "Settings"])
+                         ["1", "Agents", "2", "Changes", "3", "Browser", "4", "Pull", "Requests", "5", "Board", "6", "Settings"])
         app.handle_key("3")
         self.assertEqual(active_tab(app.render()), "Browser")
         app.handle_key("4")
@@ -319,11 +320,11 @@ class PullRequestTabTests(InventoryFixture):
         app.cols = 50
         app.refresh(manual=True)
         first = strip_sgr(app.render()).splitlines()[0]
-        self.assertEqual(first.split(), ["Agents", "Ch", "Br", "PR", "Bd", "Set"])
+        self.assertEqual(first.split(), ["1", "Agents", "2", "Ch", "3", "Br", "4", "PR", "5", "Bd", "6", "Set"])
         app.handle_key("4")
         frame = app.render()
         first = strip_sgr(frame).splitlines()[0]
-        self.assertEqual(first.split(), ["Ag", "Ch", "Br", "Pull", "Requests", "Bd", "Set"])
+        self.assertEqual(first.split(), ["1", "Ag", "2", "Ch", "3", "Br", "4", "Pull", "Requests", "5", "Bd", "6", "Set"])
         self.assertTrue(all(len(strip_sgr(line)) <= 50 for line in frame.splitlines()))
 
 
@@ -412,8 +413,7 @@ class AgentsTabTests(AgentContextFixture):
         self.assertEqual(target["pane_id"], "w1:p1")
         self.assertEqual(target["harness"], "claude")
         self.assertEqual(target["status"], "working")
-        context = strip_sgr(app.render()).splitlines()
-        self.assertTrue(any(line.startswith(" alpha / fm-helper") for line in context))
+        self.assertIn("Fm helper", selected_line(app.render()))
         app.handle_key("2")
         self.assertIn("alpha / fm-helper", strip_sgr(app.render()).splitlines()[1])
 

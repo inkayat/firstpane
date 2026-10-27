@@ -261,14 +261,13 @@ class LayoutTests(PanelFixture):
     def test_header_shows_the_selected_agent_branch_status_and_changed_files(self):
         # Break: the header does not follow the selection, reads the primary checkout
         # instead of the agent worktree, or hides the changed-file count; the Agents rows show the
-        # same count and the context line the same branch.
+        # same count.
         self.fx.write("one.txt", "1\n", root=self.wt_a)
         self.fx.write("two.txt", "2\n", root=self.wt_a)
         app = self.app()
         self.select(app, "alpha-task")
         lines = plain(app.render()).splitlines()
         self.assertIn("Changes 2", lines[0])
-        self.assertTrue(any(line.startswith(" primary / alpha-task") and line.rstrip().endswith("fm/alpha-task") for line in lines))
         alpha = lines.index(next(line for line in lines if "Alpha task" in line))
         self.assertRegex(lines[alpha], r"Alpha task\s+Idle \u00b7 2 files\s+\u203a")
         beta = lines.index(next(line for line in lines if "Beta task" in line))

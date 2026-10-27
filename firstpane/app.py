@@ -412,9 +412,6 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
         self.pending["scroll"] = max(0, self.pending.get("scroll", 0) + step)
 
     def _set_tab(self, name):
-        if name in self.hidden_tabs and name != "settings":
-            self.status = f"{TAB_LABELS[name]} is hidden; show it in Settings (6)"
-            return
         if name != self.tab:
             self._close_inline()
             self.changes_menu = None
@@ -469,7 +466,9 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
                 self.board_search.set("")
             return
         if key in ("1", "2", "3", "4", "5", "6"):
-            self._set_tab(TABS[int(key) - 1])
+            name = self._tab_for_number(key)
+            if name:
+                self._set_tab(name)
             return
         if key == "r":
             self.refresh(manual=True)
@@ -564,14 +563,15 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
     def _tab_row(self, plain):
         count = self._changed_count()
         visible = self._visible_tabs()
-        narrow = self.cols < 60 or sum(len(TAB_LABELS[name]) + 2 for name in visible) + 4 > self.cols
+        narrow = self.cols < 60 or sum(len(TAB_LABELS[name]) + 4 for name in visible) + 4 > self.cols
         parts = []
         spans = []
         column = 1
-        for name in visible:
+        for number, name in enumerate(visible, start=1):
             label = TAB_LABELS[name] if name == self.tab or not narrow else TAB_SHORT[name]
             if name == "changes" and count is not None:
                 label += ("" if label == TAB_SHORT[name] else " ") + str(count)
+            label = f"{number} {label}"
             shown = "1;4;" + rgb_fg(INK) if name == self.tab else rgb_fg(MUTED)
             parts.append(paint(label, shown, plain))
             spans.append((column, column + len(label), name))

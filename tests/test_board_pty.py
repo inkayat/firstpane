@@ -137,7 +137,7 @@ class BoardPtyTests(unittest.TestCase):
         self.assertNotIn("Waiting Review 0", narrow)
         term.send(b"n")
         term.send(b"1")
-        term.wait_for(lambda screen: "Agents" in screen.lines()[0] and "Board" in screen.lines()[0])
+        term.wait_for(lambda screen: "1 Agents" in screen.lines()[0] and "5 Bd" in screen.lines()[0])
         self.assertFalse((self.home / "data" / "backlog.md").exists())
         self.assertIn("Agents", term.screen.lines()[0])
         shutil.copy(self.tmp / "plugin-state" / "ui-state.json", evidence / "ui-state.json")

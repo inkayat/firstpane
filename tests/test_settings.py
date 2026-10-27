@@ -5,6 +5,7 @@ fixture). No browser is configured here, so choosing a placement never opens one
 """
 
 import json
+import re
 import unittest
 
 from tests.test_panel import PanelFixture, plain
@@ -259,6 +260,89 @@ class TabVisibilityTests(PanelFixture):
         self.assertTrue(any("> [ ] Board" in line for line in self.lines(app)), "\n".join(self.lines(app)))
         self.assertNotIn("Bd", self.tab_row(app))
         self.assertTrue(all(len(line) <= 44 for line in self.lines(app)))
+
+    # ---- numbers follow what is shown --------------------------------------------------
+    NAMES = ("agents", "changes", "browser", "prs", "board", "settings")
+    LABEL = dict(zip(NAMES, LABELS))
+    NUMBERED = re.compile(r"(\d) (Agents|Changes|Browser|Pull Requests|Board|Settings)")
+
+    def numbered(self, app):
+        return [(int(number), label) for number, label in self.NUMBERED.findall(self.tab_row(app))]
+
+    def save_hidden(self, hidden):
+        self.state.mkdir(parents=True, exist_ok=True)
+        (self.state / "ui-state.json").write_text(json.dumps({"hidden_tabs": list(hidden)}))
+
+    def test_every_combination_of_hidden_tabs_numbers_what_is_shown_from_one_and_the_keys_agree(self):
+        # Break: a number is still the tab's fixed position (Settings stays 6, a hidden tab leaves
+        # a gap), the row and the number keys disagree, or a number past the shown tabs opens one.
+        # Key 6 is the single extra way back to a hidden Settings.
+        for mask in range(64):
+            hidden = [name for bit, name in enumerate(self.NAMES) if mask >> bit & 1]
+            shown = [name for name in self.NAMES if name not in hidden]
+            self.save_hidden(hidden)
+            app = self.app()
+            self.assertEqual(self.numbered(app), [(n, self.LABEL[name]) for n, name in enumerate(shown, start=1)], hidden)
+            for number, name in enumerate(shown, start=1):
+                app.handle_key(str(number))
+                self.assertEqual(app.tab, name, (hidden, number))
+            for number in range(len(shown) + 1, 7):
+                before = app.tab
+                app.handle_key(str(number))
+                recovered = number == 6 and "settings" in hidden
+                self.assertEqual(app.tab, "settings" if recovered else before, (hidden, number))
+
+    def test_with_only_agents_and_settings_shown_they_are_one_and_two(self):
+        # Break: Settings keeps its fixed 6 (or leaves a gap) when the tabs between are hidden, so
+        # the number on screen is not the key that works.
+        self.save_hidden(["changes", "browser", "prs", "board"])
+        app = self.app()
+        app.handle_key("2")
+        self.assertEqual(app.tab, "settings")
+        app.handle_key("1")
+        self.assertEqual(app.tab, "agents")
+        app.handle_key("6")
+        self.assertEqual(app.tab, "agents")
+        self.assertEqual(self.tab_row(app).split(), ["1", "Agents", "2", "Settings"])
+
+    def test_hiding_and_showing_a_tab_renumbers_the_row_and_the_keys_at_once_and_after_a_restart(self):
+        # Break: the labels or the keys keep the old numbers until a restart, or the saved state
+        # stores numbers (it must keep tab names, so showing a tab again restores its place).
+        app = self.app()
+        app.handle_key("6")
+        self.toggle(app, "Changes")
+        self.assertEqual(self.numbered(app), [(1, "Agents"), (2, "Browser"), (3, "Pull Requests"), (4, "Board"), (5, "Settings")])
+        app.handle_key("5")
+        self.assertEqual(app.tab, "settings")
+        app.handle_key("1")
+        app.handle_key("4")
+        self.assertEqual(app.tab, "board")
+        self.assertEqual(self.saved()["hidden_tabs"], ["changes"])
+        again = self.app()
+        self.assertEqual(self.numbered(again), [(1, "Agents"), (2, "Browser"), (3, "Pull Requests"), (4, "Board"), (5, "Settings")])
+        again.handle_key("5")
+        self.assertEqual(again.tab, "settings")
+        self.toggle(again, "Changes")
+        self.assertEqual(self.numbered(again)[1], (2, "Changes"))
+        again.handle_key("2")
+        self.assertEqual(again.tab, "changes")
+
+    def test_a_narrow_pane_keeps_the_numbers_on_the_short_labels(self):
+        # Break: the short labels a narrow pane uses lose their numbers or keep the fixed ones.
+        self.save_hidden(["changes"])
+        app = self.app(rows=20, cols=44)
+        self.assertEqual(self.tab_row(app).split(), ["1", "Agents", "2", "Br", "3", "PR", "4", "Bd", "5", "Set"])
+        app.handle_key("5")
+        self.assertEqual(app.tab, "settings")
+
+    def test_clicking_a_numbered_tab_label_opens_it(self):
+        # Break: the click targets do not cover the number the label now starts with.
+        self.save_hidden(["changes", "browser"])
+        app = self.app()
+        self.click_text(app, "2 Pull Requests")
+        self.assertEqual(app.tab, "prs")
+        self.click_text(app, "4 Settings")
+        self.assertEqual(app.tab, "settings")
 
 
 if __name__ == "__main__":

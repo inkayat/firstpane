@@ -35,7 +35,7 @@ SEARCH_ICON = "\u2315"
 PLACEHOLDER = "Search projects or agents\u2026"
 COMPOSE_PLACEHOLDER = "Write something about the selected agent\u2026"
 COMPOSE_NO_AGENT = "Select an agent to write to FirstMate"
-TALL_TREE = 12
+TALL_TREE = 13  # the layout switches at the pane height it always did; the row its context line freed goes to the list
 WIDE_STATUS = 64
 LONG_STATUS = 88
 
@@ -200,7 +200,7 @@ class AgentsMixin:
         """Which pieces fit: the reference layout when the pane is tall enough, one-line
         fields and no gaps below that, then pieces drop (footer, counts, context, search)."""
         avail = self.rows - 1
-        tall = {"search": 3, "counts": 1, "gap": 1, "sep": 1, "ctx": 1, "label": 1, "input": 3, "footer": 1}
+        tall = {"search": 3, "counts": 1, "gap": 1, "sep": 1, "ctx": 0, "label": 1, "input": 3, "footer": 1}
         if avail - sum(tall.values()) >= TALL_TREE:
             return tall
         layout = {"search": 1, "counts": 1, "gap": 0, "sep": 0, "ctx": 1, "label": 0, "input": 1, "footer": 1}

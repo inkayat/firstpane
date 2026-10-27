@@ -266,7 +266,7 @@ class PlacedBrowser(Profiles):
     # ---- actions ---------------------------------------------------------------------
     def _unsupported(self):
         if self.platform != "darwin":
-            return "Ghostty tab needs macOS (Ghostty's AppleScript); choose Inside Firstpane in Settings (6)"
+            return "Ghostty tab needs macOS (Ghostty's AppleScript); choose Inside Firstpane in Settings"
         return ""
 
     def _other(self, context, action):
@@ -316,7 +316,7 @@ class PlacedBrowser(Profiles):
         if result.code == 127 and not result.timed_out:
             self._forget("osascript did not run")
             self.state = "failed"
-            return "Ghostty tab unavailable: osascript did not run; choose Inside Firstpane in Settings (6)"
+            return "Ghostty tab unavailable: osascript did not run; choose Inside Firstpane in Settings"
         answer = (result.stdout or "").strip()
         if result.code == 0 and answer.startswith("refused:"):
             # Checked before anything was created: no tab exists, nothing to wait for.
@@ -325,7 +325,7 @@ class PlacedBrowser(Profiles):
             self.state = "failed"
             return (f"Ghostty tab not opened: {why}. It opens in the Ghostty window in front: bring "
                     "Firstpane's Ghostty window forward and choose the tab again, or choose Inside Firstpane "
-                    "in Settings (6)")
+                    "in Settings")
         ids = answer.splitlines()
         if result.code != 0 or result.timed_out or len(ids) != 3 or not all(ids):
             lines = (result.stderr or "").strip().splitlines()
@@ -391,7 +391,7 @@ class PlacedBrowser(Profiles):
     def focus(self, context):
         self.refresh()
         if self.record is None:
-            return "no browser open; the Browser tab (3) opens one"
+            return "no browser open; the Browser tab opens one"
         refusal = self._other(context, "focus")
         if refusal:
             return refusal

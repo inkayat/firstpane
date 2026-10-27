@@ -29,7 +29,7 @@ class AgentsTabTests(PanelFixture):
         # path (inbox) or submits, or keeps the text after it was put in the box.
         app = self.app()
         app.handle_key("j")
-        self.assertIn("beta-task", selected_line(app.render()) + "".join(self.lines(app)[-6:]))
+        self.assertIn("Beta task", selected_line(app.render()))
         app.handle_key("tab")
         self.type(app, "Merhaba ş")
         self.assertIn("Merhaba ş", self.frame(app))
@@ -228,3 +228,16 @@ class AgentsTabTests(PanelFixture):
         tight = self.lines(self.app(rows=24, cols=12))
         line = next(line for line in tight if line.startswith(" fm/"))
         self.assertTrue(line.rstrip().endswith("\u2026") and len(line) <= 12, line)
+
+    def test_no_agent_line_sits_over_the_heading_and_the_list_gets_that_row(self):
+        # Break: the project / agent / branch line is still drawn above "Write to FirstMate", the
+        # freed row is left blank so the list is no taller, the heading goes with the line, or the
+        # pane height that switches to this layout moves. (The selected agent and the message
+        # target are untouched: the message tests above send to the agent under the cursor.)
+        for rows, cols in ((30, 100), (25, 60), (30, 30)):
+            lines = self.lines(self.app(rows=rows, cols=cols))
+            heading = next(index for index, line in enumerate(lines) if "Write to FirstMate" in line)
+            self.assertEqual(heading, rows - 5, (rows, cols))
+            self.assertEqual(lines[heading - 1].strip("\u2500"), "", (rows, cols))
+            self.assertFalse([line for line in lines if "fm/alpha-task" in line or "primary / " in line], (rows, cols))
+            self.assertEqual(lines[heading + 1].count("\u256d"), 1, (rows, cols))
