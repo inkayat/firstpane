@@ -730,7 +730,7 @@ def mutate(
         prior = read_config(config_path)
         write_config(config_path, prior, install_root, firstmate, preserved_browser)
         libs = None if preserved_browser else linux_library_gaps(install_root / BROWSER_DIRNAME)
-    except InstallError:
+    except (InstallError, KeyboardInterrupt):
         cleanup_staging(staging)
         raise
     except Exception as exc:
@@ -826,10 +826,10 @@ def stage_browser(staging: Path, pins: dict, asset: dict, patch: dict) -> Path:
     safe_extract(archive, extracted, max_bytes)
     runtime = locate_runtime(extracted)
     apply_sender_patch(runtime, staging, patch, max_bytes)
-    version = (runtime / "VERSION").read_text().strip()
-    if version != BROWSER_VERSION:
+    if browser_version(runtime) != BROWSER_VERSION:
+        found = (runtime / "VERSION").read_text().strip()
         raise InstallError(
-            f"extracted VERSION is {version!r}, expected {BROWSER_VERSION}; not activating"
+            f"extracted VERSION is {found!r}, expected {BROWSER_VERSION}; not activating"
         )
     binary = runtime / "bin" / "terminal-browser"
     if not binary.is_file() or binary.is_symlink() or not os.access(binary, os.X_OK):
@@ -1210,19 +1210,19 @@ def ensure_link(herdr: str, source_path: Path, linked: dict | None) -> None:
     foreign = foreign_link_error(linked, target)
     if foreign:
         raise InstallError(foreign)
-    if linked:
-        if linked.get("enabled") is True:
-            return
-        result = run_argv([herdr, "plugin", "enable", PLUGIN_ID])
+    if not linked:
+        result = run_argv([herdr, "plugin", "link", target])
         if result.returncode != 0:
-            raise InstallError("herdr plugin enable firstpane failed: " + result.stderr.strip())
+            raise InstallError("herdr plugin link failed: " + result.stderr.strip())
+        # Herdr enables a new link itself; `plugin enable` needs a running server.
+        linked = find_plugin(herdr_list(herdr), PLUGIN_ID)
+        if not linked or foreign_link_error(linked, target):
+            raise InstallError("herdr plugin link did not list firstpane at " + target)
+    if linked.get("enabled") is True:
         return
-    result = run_argv([herdr, "plugin", "link", target])
+    result = run_argv([herdr, "plugin", "enable", PLUGIN_ID])
     if result.returncode != 0:
-        raise InstallError("herdr plugin link failed: " + result.stderr.strip())
-    enabled = run_argv([herdr, "plugin", "enable", PLUGIN_ID])
-    if enabled.returncode != 0:
-        raise InstallError("herdr plugin enable firstpane failed: " + enabled.stderr.strip())
+        raise InstallError("herdr plugin enable firstpane failed: " + result.stderr.strip())
 
 
 def herdr_config_dir(herdr: str) -> Path:
@@ -1342,10 +1342,16 @@ def fill_if_absent(config: dict, key: str, value: str, valid) -> bool:
     return True
 
 
+def browser_version(path: Path) -> str:
+    # The official 0.13.4 archives write "v0.13.4"; an unpacked copy may say "0.13.4".
+    text = (path / "VERSION").read_text().strip()
+    return text[1:] if text.startswith("v") else text
+
+
 def valid_browser(path: Path) -> bool:
     binary = path / "bin" / "terminal-browser"
     version = path / "VERSION"
-    return binary.is_file() and not binary.is_symlink() and version.is_file() and version.read_text().strip() == BROWSER_VERSION
+    return binary.is_file() and not binary.is_symlink() and version.is_file() and browser_version(path) == BROWSER_VERSION
 
 
 def valid_fm_root(path: Path) -> bool:

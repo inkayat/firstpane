@@ -35,32 +35,33 @@ Every write needs a preview and `y`: Git operations, GitHub comments, resolving 
 | --- | --- | --- |
 | OS / CPU | macOS or Linux, arm64 or x86_64. No Windows support. | The demo renders above were produced on macOS arm64 with Herdr 0.9.5. The existing CI workflow runs unit tests on Ubuntu with Python 3.11. |
 | Herdr | 0.9.0 or newer | Checked by the installer and by Herdr's plugin manifest. |
-| Python | 3.11 or newer. Standard library only. | Checked by the installer. |
+| Python | 3.11 or newer. Standard library only. | Checked by the installer. macOS's own `/usr/bin/python3` (3.9.6 on the tested macOS 27.0.1) is refused; install Python 3.11+ and put it first on `PATH`. |
 | Git | yes (no minimum version is checked) | Required by the installer and the Changes tab. |
+| Linux browser libraries | the shared libraries terminal-browser's Electron loads. Arch/Omarchy: `gtk3 nss alsa-lib mesa` | Checked by the installer with `ldd`. In a clean Arch Linux x86_64 container those four packages supplied every missing library. |
 | `gh` CLI | logged in to each GitHub host you use | Only the Pull Requests tab needs it. |
 | Ghostty 1.3+ | only for the Ghostty-tab browser on macOS | — |
 
-The unit tests run on Ubuntu in CI. The installer and a live Firstpane pane have not been verified on Linux or Omarchy; Linux support rests on the code and the pinned Linux browser builds.
+The unit tests run on Ubuntu in CI. The installer was run end to end in a clean Arch Linux x86_64 Docker container (emulated on Apple silicon) where Git, Python, Herdr 0.9.5 and, for the successful runs, the browser libraries had been installed first: download, checksum, patch, Herdr link, config, rerun and upgrade. That is a terminal-only container, not Omarchy: a live Firstpane pane, Hyprland/Wayland, kitty graphics and the Electron browser have not been verified on Linux. On macOS 27.0.1 arm64 it was run in private test home directories with Git, Python 3.14 and Herdr 0.9.5 already installed: darwin-arm64 download, checksum, patch, Herdr link, config, rerun, upgrade and a rerun after Ctrl-C. No Firstpane pane or browser was started from that install, and an Intel Mac was not tested.
 
 ## Install
 
 > [!IMPORTANT]
-> This command is the public source entrypoint. Anonymous source access and synthetic/offline checks are not a live installation test: this publication has not exercised actual installer activation, download or upgrade on macOS or Linux. Review the plan with `--check` before accepting installation.
+> This command is the public source entrypoint. It has been run end to end only in a clean Arch Linux x86_64 container and in private test homes on macOS arm64 (see [Requirements](#requirements)), not on an Omarchy desktop or an Intel Mac. Review the plan with `--check` before accepting installation.
 
 ```sh
-git clone --depth 1 https://github.com/inkayat/firstpane.git -- "$HOME/.local/share/firstpane-bootstrap" && python3 -- "$HOME/.local/share/firstpane-bootstrap/bin/install-firstpane"
+cd "$(mktemp -d)" && git clone --depth 1 https://github.com/inkayat/firstpane.git && python3 -- firstpane/bin/install-firstpane
 ```
 
 The Add context patch is bundled in `docs/`, with its existing SHA-256 and size pins; no private historical commit or anonymous raw-helper download is needed. Offline synthetic patch/copy checks are not proof of a live installation.
 
-The installer pins that exact public origin and is designed for macOS and Linux (arm64 or x86_64). Git, Python 3.11+ and Herdr 0.9.0+ must already be installed. It does not install them, use sudo, or edit shell startup files. Its intended flow from a published clean checkout is:
+The installer pins that exact public origin and is designed for macOS and Linux (arm64 or x86_64). Git, Python 3.11+ and Herdr 0.9.0+ must already be installed, plus the browser libraries on Linux. It does not install them, use sudo, or edit shell startup files. Its intended flow from a published clean checkout is:
 
-1. prints its plan and asks before changing anything (`--check` prints the plan only; `--yes` accepts it without asking);
-2. clones the clean checkout to `~/.local/share/firstpane/src` (`$XDG_DATA_HOME/firstpane/src` if that is set), then links and enables it as the `firstpane` Herdr plugin;
+1. prints its plan and asks before changing anything (`--check` prints the plan only and makes no deployment, download, Herdr link or config change; Herdr's own `herdr plugin list` can still create its lock file and directories under `~/.config/herdr`; `--yes` accepts the plan without asking);
+2. clones the clean checkout to `~/.local/share/firstpane/src` (`$XDG_DATA_HOME/firstpane/src` if that is set), then links it as the `firstpane` Herdr plugin. Herdr enables a new link itself; the installer runs `herdr plugin enable firstpane` only when Herdr lists the plugin disabled, and that command needs a running Herdr server;
 3. downloads the pinned terminal-browser 0.13.4 for your platform, checks its SHA-256, and applies the checksum-verified bundled select-tool patch (skipped when a valid patched copy is already installed or configured);
 4. writes `terminal_browser_root`, and the FirstMate paths if any, to the plugin's `config.json`. Keys you already set are kept.
 
-FirstMate is optional. The installer uses FirstMate's paths if it can find them, and asks otherwise. Pass `--firstmate-home` and `--firstmate-root` to choose them, or `--without-firstmate` to skip FirstMate. On Linux, if the browser's shared libraries are missing, the installer names the Debian packages to install (`libnss3 libgtk-3-0 libasound2t64 libgbm1`) and exits with code 4. The files it installed stay in place.
+FirstMate is optional. The installer uses FirstMate's paths if it can find them, and asks otherwise. Pass `--firstmate-home` and `--firstmate-root` to choose them, or `--without-firstmate` to skip FirstMate. On Linux, if the browser's shared libraries are missing, the installer lists them and exits with code 4. The files it installed stay in place. Install the libraries (Arch/Omarchy: `sudo pacman -S --needed gtk3 nss alsa-lib mesa`; Debian/Ubuntu: `libnss3 libgtk-3-0 libasound2t64 libgbm1`), then run the same command again.
 
 The installer does not open a pane. To open one:
 
@@ -68,7 +69,7 @@ The installer does not open a pane. To open one:
 herdr plugin pane open --plugin firstpane --entrypoint tree
 ```
 
-To upgrade, run `git -C ~/.local/share/firstpane-bootstrap pull --ff-only`, then run the installer again. The previous source moves to `~/.local/share/firstpane/src.previous`. The installer will not replace an existing `src.previous`, so move it aside before the next upgrade.
+The command clones into a new temporary directory each time, so the same command retries a failed install and upgrades an existing one; the installer copies what it needs and the temporary clone can be deleted. A rerun at the same commit changes nothing. An upgrade moves the previous source to `~/.local/share/firstpane/src.previous`. The installer will not replace an existing `src.previous`, so move it aside before the next upgrade. A `~/.local/share/firstpane-bootstrap` checkout left by the earlier command is no longer used.
 
 <details>
 <summary>Manual install from a checkout</summary>
@@ -77,9 +78,10 @@ Use a checkout that will stay where it is. Linking is user-global, so do not lin
 
 ```sh
 herdr plugin link /path/to/firstpane
-herdr plugin enable firstpane
 herdr plugin pane open --plugin firstpane --entrypoint tree
 ```
+
+`herdr plugin link` enables the plugin. Run `herdr plugin enable firstpane` only if `herdr plugin list` shows it disabled; that command needs a running Herdr server.
 
 The manual steps do not download terminal-browser or apply its select-tool patch. To use the Browser tab, set `terminal_browser_root` yourself (see [Configuration](#configuration)). Without the patch in `docs/terminal-browser-0.13.4-context.md`, a note typed into the select tool's tooltip cannot be previewed without opening a second editor.
 
@@ -157,8 +159,8 @@ Once FirstMate or a project scope is configured, agents outside that scope are h
 
 ## Known limitations
 
-- **Source distribution**: `v0.1.0` is the initial clean source tag, not a hosted release with binary assets. Actual installer activation/download/upgrade has not been exercised for this publication (see [Install](#install)). No project-wide license is present; third-party attribution and vendor mark conditions are retained in [`firstpane/icons/SOURCES.md`](firstpane/icons/SOURCES.md), not replaced by a new license or permission claim.
-- **Linux**: the Ghostty-tab browser is macOS-only, but it is the default placement on every OS. On Linux, choose **Inside Firstpane** in Settings before using the Browser tab. The installer and the live pane have not been tested on Linux or Omarchy.
+- **Source distribution**: `v0.1.0` is the initial clean source tag, not a hosted release with binary assets. The installer has been exercised only in an Arch Linux container and in private test homes on macOS arm64 (see [Install](#install)). No project-wide license is present; third-party attribution and vendor mark conditions are retained in [`firstpane/icons/SOURCES.md`](firstpane/icons/SOURCES.md), not replaced by a new license or permission claim.
+- **Linux**: the Ghostty-tab browser is macOS-only, but it is the default placement on every OS. On Linux, choose **Inside Firstpane** in Settings before using the Browser tab. The live pane has not been tested on Linux or Omarchy; the installer was tested only in a terminal-only Arch Linux container.
 - **Browser**: Inside Firstpane can be slow, and that is not fixed. Page frames reach the pane as kitty graphics through Herdr. Firstpane passes at most about two page updates a second, whatever the transport, because a Herdr client that has fallen back to inline images (which Firstpane cannot see) queues every update ahead of your keys. Switching tabs, or a change of the page's size or rows, can wait up to a quarter second for the frames to go quiet, so that Herdr is less likely to drop its fast image path; this lowers the risk of the whole interface freezing but cannot undo a client that already fell back. The tab says when the terminal accepts neither shared-memory nor file frames. Inside Firstpane the browser belongs to Firstpane and closes with it. Cookies and page state are lost when a browser closes; the profile and the last address are kept. A Ghostty tab opens only when Ghostty is the front app and has a window. Firstpane does not start or check development servers: agents using the same address reach the same server.
 - **FirstMate messages**: only a pi FirstMate can receive them. A keystroke typed into FirstMate between Firstpane's last check and the paste can still land first. pi shows pastes longer than ten lines as `[paste #N +K lines]`.
 - **Board**: read-only, and it depends on `fm-board` sitting next to the `fm` launcher on `PATH`. Cards do not show PRs or checks.
