@@ -10,12 +10,14 @@ import json
 import os
 import runpy
 import shutil
+import signal
 import stat
 import subprocess
 import sys
 import tarfile
 import tempfile
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -133,6 +135,13 @@ if argv[:2] == ["plugin", "link"] and len(argv) == 3:
     print("linked")
     raise SystemExit(0)
 if argv[:2] == ["plugin", "enable"] and argv[2:] == ["firstpane"]:
+    # Herdr 0.9.5 on Linux: link alone enables; enable needs a running server.
+    if os.environ.get("HERDR_FAKE_SERVER") != "1":
+        sys.stderr.write(json.dumps({"id": "cli:plugin", "error": {
+            "code": "server_not_running",
+            "message": "no herdr server is running; run `herdr` to start or attach it",
+        }}) + "\\n")
+        raise SystemExit(1)
     for item in state["plugins"]:
         if item.get("plugin_id") == "firstpane":
             item["enabled"] = True
@@ -190,7 +199,8 @@ exit 0
         self.make_tar(
             self.archive,
             [
-                ("terminal-browser/VERSION", b"0.13.4\n", 0o644),
+                # The official 0.13.4 archives ship VERSION as "v0.13.4\n".
+                ("terminal-browser/VERSION", b"v0.13.4\n", 0o644),
                 ("terminal-browser/bin/terminal-browser", script, 0o755),
                 ("terminal-browser/payload.txt", self.payload_before, 0o644),
                 ("terminal-browser/rel", "payload.txt", None),
@@ -304,6 +314,7 @@ exit 0
             "FIRSTPANE_CHECK_LINUX_LIBS",
             "HERDR_FAKE_VERSION",
             "HERDR_FAKE_CONFIG_DIR",
+            "HERDR_FAKE_SERVER",
         ):
             base.pop(key, None)
         base.update(
@@ -349,7 +360,7 @@ exit 0
         config = json.loads(self.config_path().read_text())
         browser = Path(config["terminal_browser_root"])
         self.assertEqual((browser / "payload.txt").read_bytes(), self.payload_after)
-        self.assertEqual((browser / "VERSION").read_text().strip(), "0.13.4")
+        self.assertEqual((browser / "VERSION").read_text().strip(), "v0.13.4")
         self.assertTrue((browser / "rel").is_symlink())
         linked = [call for call in self.herdr_calls() if call[:2] == ["plugin", "link"]]
         self.assertEqual(len(linked), 1)
@@ -455,6 +466,25 @@ exit 0
         self.assertIn("does not apply", result.stderr)
         self.assertFalse((self.install_root() / "terminal-browser-0.13.4").exists())
         self.assertFalse(self.config_path().exists())
+
+    def test_other_archive_version_is_not_activated(self):
+        # Break: version normalisation accepts any "v"-prefixed or other release.
+        for version in (b"v0.13.5\n", b"vv0.13.4\n", b"0.13\n"):
+            with self.subTest(version=version):
+                self.make_tar(
+                    self.archive,
+                    [
+                        ("terminal-browser/VERSION", version, 0o644),
+                        ("terminal-browser/bin/terminal-browser", b"#!/bin/sh\n", 0o755),
+                        ("terminal-browser/payload.txt", self.payload_before, 0o644),
+                    ],
+                )
+                self.write_pins(self.good_assets())
+                result = self.run_install("--yes", "--without-firstmate")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("expected 0.13.4; not activating", result.stderr)
+                self.assertFalse((self.install_root() / "terminal-browser-0.13.4").exists())
+                self.assertFalse(self.config_path().exists())
 
     def test_malicious_archive_paths_and_symlinks_are_rejected(self):
         outside = self.root / "outside"
@@ -563,6 +593,54 @@ exit 0
         self.assertEqual(retried.returncode, 0, retried.stderr)
         self.assertTrue(self.config_path().is_file())
 
+    def test_ctrl_c_during_download_removes_staging(self):
+        # Break: an interrupt leaves .staging-<pid> with a partial archive behind.
+        data = self.archive.read_bytes()
+        release = threading.Event()
+
+        class Stall(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data[: len(data) // 2])
+                self.wfile.flush()
+                release.wait(30)
+
+            def log_message(self, fmt, *args):
+                return
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Stall)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            assets = self.good_assets()
+            for asset in assets.values():
+                asset["url"] = f"http://127.0.0.1:{server.server_address[1]}/browser.tar.gz"
+            self.write_pins(assets)
+            proc = subprocess.Popen(
+                [sys.executable, str(self.repo / "bin" / "install-firstpane"),
+                 "--yes", "--without-firstmate"],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, env=self.env(),
+            )
+            for _ in range(500):
+                if list(self.install_root().glob(".staging-*/terminal-browser.tar.gz")):
+                    break
+                time.sleep(0.02)
+            else:
+                proc.kill()
+                self.fail("download never started")
+            proc.send_signal(signal.SIGINT)
+            _, stderr = proc.communicate(timeout=20)
+        finally:
+            release.set()
+            server.shutdown()
+            server.server_close()
+        self.assertEqual(proc.returncode, 1, stderr)
+        self.assertIn("interrupted", stderr)
+        self.assertEqual(list(self.install_root().glob(".staging-*")), [])
+        self.assertFalse((self.install_root() / "src").exists())
+
     def test_no_sudo_restart_message_or_unexpected_network(self):
         seen = []
 
@@ -669,6 +747,22 @@ exit 0
         self.assertFalse(self.install_root().exists())
         self.assertFalse(self.config_path().exists())
         self.assertFalse(any(call[:2] == ["plugin", "link"] for call in self.herdr_calls()))
+
+    def test_own_disabled_link_is_enabled_through_running_herdr(self):
+        # Break: the installer stops enabling a plugin Herdr reports disabled.
+        self.state.write_text(json.dumps({"plugins": [{
+            "plugin_id": "firstpane",
+            "plugin_root": str(self.install_root() / "src"),
+            "enabled": False,
+            "source": {"kind": "local"},
+        }]}))
+        result = self.run_install(
+            "--yes", "--without-firstmate", env=self.env(HERDR_FAKE_SERVER="1")
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(["plugin", "enable", "firstpane"], self.herdr_calls())
+        self.assertFalse(any(call[:2] == ["plugin", "link"] for call in self.herdr_calls()))
+        self.assertTrue(self.config_path().is_file())
 
     def test_linux_library_gap_does_not_sudo(self):
         write_executable(self.bindir / "ldd", f"""#!/bin/sh
