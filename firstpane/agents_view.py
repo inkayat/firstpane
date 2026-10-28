@@ -521,8 +521,12 @@ class AgentsMixin:
         elif self.focus == "search":
             hints = [("Enter", "Keep"), ("Esc", "Clear")]
         else:
-            enter = "Fold" if row is not None and row["kind"] == "project" else "Workspace"
-            hints = [("\u2191\u2193", "Select"), ("Enter", enter), ("g", "Focus"), ("Tab", "Message"), ("/", "Search"), ("f", "Filter")]
+            hints = [("\u2191\u2193", "Select")]
+            if row is not None and row["kind"] == "project":
+                hints.append(("Enter", "Fold"))
+            elif row is not None and row["kind"] == "agent" and not (self.target and tuple(self.target["key"]) == tuple(row["key"])):
+                hints.append(("Enter", "Select"))
+            hints += [("g", "Focus"), ("Tab", "Message"), ("/", "Search"), ("f", "Filter")]
         out, used = "", 1
         for key, word in hints:
             piece = (2 if out else 0) + width(key) + 1 + width(word)

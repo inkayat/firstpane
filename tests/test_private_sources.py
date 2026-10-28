@@ -358,6 +358,75 @@ class PrivateSourceTests(unittest.TestCase):
         self.assertIn("beta", selected_line(app.render()))
         self.assertNotIn(humanize("beta-one"), strip_sgr(app.render()))
 
+    def test_moving_between_same_named_agents_of_two_projects_selects_each_ones_own_source(self):
+        # Break: moving the cursor leaves the other tabs on an agent chosen earlier until Enter;
+        # a project heading selects its first agent; or two agents with one name in different
+        # projects are told apart by that name, so Changes reads the other one's worktree.
+        beta = self.repo(self.home / "projects" / "beta")
+        trees = {"alpha": self.worktree(self.alpha, self.root / "alpha-wt", "fm/same"),
+                 "beta": self.worktree(beta, self.root / "beta-wt", "fm/same")}
+        for number, (name, tree) in enumerate(trees.items(), start=1):
+            (tree / f"{name}-only.txt").write_text("x\n")
+            row = pane(pane_id=f"w{number}:p1", terminal_id=f"term_{name}", workspace_id=f"w{number}",
+                       tab_id=f"w{number}:t1", cwd=str(tree), foreground_cwd=str(tree))
+            self.rows.append(row)
+            self.agents.append(agent_for(row, name="claude"))
+            self.workspaces.append(workspace(f"w{number}", name, number=number))
+        self.transport.snapshot = snapshot(self.workspaces, self.rows, self.agents)
+        # Without a FirstMate home every open agent is listed under the repository it works in.
+        app = App(config=Config(socket_path=self.config.socket_path), transport=self.transport, state_dir=self.root / "state",
+                  env=self.env, clock=Clock(), terminal=FakeTerminal(), rows=60, cols=120)
+        app.refresh(manual=True)
+        self.assertEqual(self.headers(strip_sgr(app.render())), [("alpha", 1), ("beta", 1)])
+
+        def changes():
+            app.handle_key("2")
+            text = strip_sgr(app.render())
+            app.handle_key("1")
+            return text
+
+        app.handle_key("j")  # alpha's agent -> beta's heading
+        self.assertIn("no agent selected", changes())
+        app.handle_key("j")  # -> beta's agent
+        text = changes()
+        self.assertIn("beta / claude", text.splitlines()[1])
+        self.assertIn(str(trees["beta"].name), text.splitlines()[2])
+        self.assertIn("beta-only.txt", text)
+        self.assertNotIn("alpha-only.txt", text)
+        app.handle_key("k")  # -> beta's heading: beta's agent stays selected
+        self.assertIn("beta / claude", changes().splitlines()[1])
+        app.handle_key("k")  # -> alpha's agent
+        text = changes()
+        self.assertIn("alpha / claude", text.splitlines()[1])
+        self.assertIn(str(trees["alpha"].name), text.splitlines()[2])
+        self.assertIn("alpha-only.txt", text)
+        self.assertNotIn("beta-only.txt", text)
+
+    def test_a_lone_agent_is_offered_enter_until_it_is_selected(self):
+        # Break: with one agent the list has nowhere to move, so the highlighted agent stays
+        # unselected and the footer and the Browser tab give no way to select it.
+        tree = self.worktree(self.alpha, self.root / "alpha-wt", "fm/solo")
+        (tree / "solo-only.txt").write_text("x\n")
+        row = pane(pane_id="w1:p1", terminal_id="term_solo", workspace_id="w1", tab_id="w1:t1",
+                   cwd=str(tree), foreground_cwd=str(tree))
+        self.rows.append(row)
+        self.agents.append(agent_for(row, name="claude"))
+        self.workspaces.append(workspace("w1", "alpha", number=1))
+        self.transport.snapshot = snapshot(self.workspaces, self.rows, self.agents)
+        app = App(config=Config(socket_path=self.config.socket_path), transport=self.transport, state_dir=self.root / "state",
+                  env=self.env, clock=Clock(), terminal=FakeTerminal(), rows=60, cols=120)
+        app.refresh(manual=True)
+        self.assertIsNone(app.target)
+        self.assertIn("Enter Select", strip_sgr(app.render()).splitlines()[-1])
+        app.handle_key("3")
+        self.assertIn("press Enter", strip_sgr(app.render()))
+        app.handle_key("1")
+        app.handle_key("enter")
+        self.assertIsNotNone(app.target)
+        self.assertNotIn("Enter", strip_sgr(app.render()).splitlines()[-1])
+        app.handle_key("2")
+        self.assertIn("solo-only.txt", strip_sgr(app.render()))
+
 
 if __name__ == "__main__":
     unittest.main()

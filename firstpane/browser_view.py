@@ -42,7 +42,7 @@ class BrowserTabMixin:
         """(context, "") for the selected agent's browser, else (None, why there is none)."""
         target = self.target
         if not target:
-            return None, "no agent selected: select an agent on the Agents tab, then press Enter; each agent has its own browser"
+            return None, "no agent selected: select an agent on the Agents tab (move onto it or press Enter); each agent has its own browser"
         info = self._ws_info(target)
         if info is None:
             return None, f"reading {target.get('label')}'s worktree…"
