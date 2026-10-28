@@ -1,11 +1,15 @@
 """terminal-browser helpers for the Browser tab's in-tab browser (firstpane/browser.py).
 
-- FrameStream: forwards the browser's PIXEL_TTY output whole-sequence-at-a-time. Frames sent
-  through shared memory or a file pass straight through. Only directly transmitted (inline)
-  full frames of the embed image are coalesced: Herdr removes an image while each inline
-  replacement arrives, so back-to-back inline frames reach the pane at most once per
-  IMAGE_FRAME_INTERVAL and the latest frame always does. Any other output between frames resets
-  the interval (order is preserved), so such a stream is not coalesced.
+- FrameStream: forwards the browser's PIXEL_TTY output whole-sequence-at-a-time. Full frames of
+  the embed image are coalesced whatever their medium (inline, shared memory or file): Herdr's
+  client can lose its fast image path and then queues every frame it is sent, ahead of every
+  key, so frames reach the pane at most once per IMAGE_FRAME_INTERVAL and the latest frame
+  always does. A superseded shared-memory frame is unlinked (no terminal will read it); file
+  frames name terminal-browser's own reused ring files, which are left alone. Other output
+  (the delete before a resized frame, cursor commands) that arrives while a frame is held waits
+  with it, in order, so it never lets the frame out early.
+  Geometry changes wait for a quiet window (LAYOUT_QUIET) after the last frame: a frame of a new
+  size waits here, placement and size changes in firstpane/browser.py `place`.
 - capture_context: reads URL, title and selection of the exact registry tab over loopback
   CDP. It never calls `terminal-browser action`, which marks the tab agent-controlled.
 - browser_env: the embed variables, a short agent-control glow (terminal-browser 0.13.4 reads
@@ -30,9 +34,18 @@ import urllib.request
 
 from firstpane.sanitize import sanitize
 
+try:
+    import _posixshmem
+except ImportError:  # pragma: no cover - CPython on macOS and Linux has it
+    _posixshmem = None
+
 # Herdr's client fell back to about two presents per second once its fast image path was
-# lost; forwarding faster than that only builds a backlog of replacements.
+# lost; forwarding faster than that only builds a backlog of replacements, whatever the medium.
 IMAGE_FRAME_INTERVAL = 0.5
+# Herdr turns its fast image path off for a client for good when the page image's placement or
+# size changes while a frame is still on its way to that client; geometry changes wait this long
+# after the last frame (approved 150-250 ms; not measured on glass).
+LAYOUT_QUIET = 0.25
 # terminal-browser sweeps agent control every 500 ms, so the glow ends 1.0-1.5 s after the
 # last agent call instead of 10 s.
 AGENT_CONTROL_MS = "1000"
@@ -80,26 +93,49 @@ def _graphics_keys(seq):
     return dict(part.split(b"=", 1) for part in head.split(b",") if b"=" in part)
 
 
-class FrameStream:
-    """Whole-sequence forwarder that coalesces superseded direct a=T frames of one image.
+def _graphics_payload(seq):
+    body = seq[3:-2] if seq.endswith(b"\x1b\\") else seq[3:-1]
+    return body.partition(b";")[2]
 
-    Only complete, directly transmitted (t=d) a=T commands for `image_id` are held; the
-    newest replaces an older held one. Any other byte or command first flushes the held
-    frame, so order is preserved and nothing else is ever dropped. Partial sequences and
-    unfinished frames are never forwarded.
+
+class FrameStream:
+    """Whole-sequence forwarder that coalesces superseded a=T frames of one image.
+
+    Only complete a=T commands for `image_id` sent directly (t=d), through shared memory (t=s)
+    or a file (t=f) are held; the newest replaces an older held one, and a replaced
+    shared-memory frame is unlinked. Any other byte or command is forwarded at once when no
+    frame is held; otherwise it is held with the frame, before it if it arrived before the
+    newest frame and after it if later, and leaves with it when the frame may be released.
+    Order is preserved and nothing else is ever dropped. Output held this way beyond
+    `max_pending` bytes releases the frame at once (a flooding browser must not grow memory).
+    Partial sequences and unfinished frames are never forwarded.
+
+    Quiet window: a held frame of another size than the last forwarded one waits until `quiet`
+    after the last frame or placed layout (`placed`), and no frame is released while a layout
+    change waits (`fenced`) or for `quiet` after one was placed.
     """
 
     def __init__(self, image_id, interval=IMAGE_FRAME_INTERVAL, max_frame=MAX_FRAME_BYTES,
-                 max_pending=MAX_PENDING_BYTES):
+                 max_pending=MAX_PENDING_BYTES, quiet=LAYOUT_QUIET):
         self.image_id = str(image_id).encode()
         self.interval = interval
         self.max_frame = max_frame
         self.max_pending = max_pending
+        self.quiet = quiet
         self.pending = b""
         self.collecting = None
+        self.collecting_keys = None
         self.collected = 0
         self.held = None
+        self.held_keys = None
+        self.lead = []
+        self.behind = []
+        self.deferred = 0
         self.next_at = None
+        self.size = None
+        self.changed_at = None
+        self.hold_until = None
+        self.fenced = False
         self.frames_in = 0
         self.frames_out = 0
         self.superseded = 0
@@ -115,7 +151,7 @@ class FrameStream:
                 stop = buf.find(b"\x1b")
                 stop = len(buf) if stop < 0 else stop
                 self.pending = buf[stop:]
-                self._other(buf[:stop], out)
+                self._other(buf[:stop], out, now)
                 continue
             n = seq_length(buf)
             if n == 0:
@@ -126,45 +162,106 @@ class FrameStream:
             self.pending = buf[n:]
             seq = buf[:n]
             if seq.startswith(b"\x1b_G"):
-                self._graphics(seq, out)
+                self._graphics(seq, out, now)
             else:
-                self._other(seq, out)
+                self._other(seq, out, now)
         out.append(self.due(now))
         return b"".join(out)
 
+    def ready(self, now):
+        """Whether `due` would release the held frame now, were no layout change waiting."""
+        if self.held is None:
+            return False
+        waits = (self.next_at, self.hold_until, None if self._size(self.held_keys) == self.size else self._quiet_at())
+        return all(at is None or now >= at for at in waits)
+
     def due(self, now):
-        """The held frame, once the interval since the last forwarded frame has passed."""
-        if self.held is None or (self.next_at is not None and now < self.next_at):
+        """The held frame, once the interval since the last forwarded frame has passed (and
+        the quiet window, for a frame of a new size)."""
+        if self.fenced or not self.ready(now):
             return b""
-        frame, self.held = self.held, None
-        self.frames_out += 1
-        self.next_at = now + self.interval
-        return frame
+        return self._send(now)
 
     def deadline(self):
-        """When `due` will release the held frame, or None when nothing is held."""
-        return None if self.held is None else self.next_at
+        """When `due` may release the held frame or a waiting layout change may be placed, or
+        None when neither waits."""
+        if self.fenced:
+            return self._quiet_at()
+        if self.held is None:
+            return None
+        waits = (self.next_at, self.hold_until, None if self._size(self.held_keys) == self.size else self._quiet_at())
+        return max((at for at in waits if at is not None), default=None)
+
+    def settled(self, now):
+        """Whether `quiet` has passed since the last forwarded frame or placed layout."""
+        at = self._quiet_at()
+        return at is None or now >= at
+
+    def placed(self, now):
+        """A layout change was written at `now`: frames wait `quiet` before following it."""
+        self.fenced = False
+        self.changed_at = now
+        self.hold_until = now + self.quiet
 
     def close(self):
         """End of browser output: the held complete frame; unfinished bytes are dropped."""
         self.discarded += len(self.pending) + self.collected
         self.pending, self.collecting, self.collected = b"", None, 0
-        frame, self.held = self.held or b"", None
+        frame = b"".join(self.lead) + (self.held or b"") + b"".join(self.behind)
+        self.held, self.lead, self.behind, self.deferred = None, [], [], 0
         return frame
 
-    def _graphics(self, seq, out):
+    def discard(self):
+        """The browser is gone and nothing more is forwarded: drop the held frame, unlinking its
+        shared memory, and any unfinished bytes."""
+        if self.held is not None:
+            self._drop(self.held, self.held_keys)
+            self.held = None
+        self.lead, self.behind = [], []
+        self.close()
+
+    def _quiet_at(self):
+        return None if self.changed_at is None else self.changed_at + self.quiet
+
+    @staticmethod
+    def _size(keys):
+        return keys.get(b"s"), keys.get(b"v")
+
+    def _send(self, now):
+        """The held frame with the output held around it, forwarded at `now`."""
+        frame = b"".join(self.lead) + self.held + b"".join(self.behind)
+        self.size = self._size(self.held_keys)
+        self.changed_at = now
+        self.next_at = now + self.interval
+        self.held = self.held_keys = None
+        self.lead, self.behind, self.deferred = [], [], 0
+        self.frames_out += 1
+        return frame
+
+    def _drop(self, frame, keys):
+        """A frame that never reaches the pane: unlink the shared memory it names, as the
+        terminal would have after reading it. A file frame names one of terminal-browser's
+        reused ring files, so it is left alone."""
+        if keys.get(b"t") != b"s" or _posixshmem is None:
+            return
+        try:
+            _posixshmem.shm_unlink(base64.b64decode(_graphics_payload(frame), validate=True).decode())
+        except (OSError, ValueError):
+            pass
+
+    def _graphics(self, seq, out, now):
         keys = _graphics_keys(seq)
         if self.collecting is not None:
             if b"a" in keys or b"i" in keys:
-                self._other(seq, out)
+                self._other(seq, out, now)
                 return
             self.collecting.append(seq)
             self.collected += len(seq)
         elif (keys.get(b"a") == b"T" and keys.get(b"i") == self.image_id
-              and keys.get(b"t", b"d") == b"d"):
-            self.collecting, self.collected = [seq], len(seq)
+              and keys.get(b"t", b"d") in (b"d", b"s", b"f")):
+            self.collecting, self.collecting_keys, self.collected = [seq], keys, len(seq)
         else:
-            self._other(seq, out)
+            self._other(seq, out, now)
             return
         if keys.get(b"m", b"0") == b"0":
             frame = b"".join(self.collecting)
@@ -172,20 +269,23 @@ class FrameStream:
             self.frames_in += 1
             if self.held is not None:
                 self.superseded += 1
-            self.held = frame
+                self._drop(self.held, self.held_keys)
+                self.lead, self.behind = self.lead + self.behind, []
+            self.held, self.held_keys = frame, self.collecting_keys
         elif self.collected > self.max_frame:
-            self._other(b"", out)
+            self._other(b"", out, now)
 
-    def _other(self, unit, out):
-        if self.held is not None:
-            out.append(self.held)
-            self.held = None
-            self.frames_out += 1
-        if self.collecting is not None:
-            out.extend(self.collecting)
-            self.collecting, self.collected = None, 0
-        out.append(unit)
-        self.next_at = None
+    def _other(self, unit, out, now):
+        units = [part for part in (*(self.collecting or ()), unit) if part]
+        self.collecting, self.collected = None, 0
+        out.append(self.due(now))
+        if self.held is None:
+            out.extend(units)
+            return
+        self.behind.extend(units)
+        self.deferred += sum(map(len, units))
+        if self.deferred > self.max_pending:
+            out.append(self._send(now))
 
 
 def browser_env(base, embed_socket, pixel_tty):
