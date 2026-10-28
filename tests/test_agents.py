@@ -102,12 +102,14 @@ class AgentsTabTests(PanelFixture):
 
     def test_the_footer_names_the_keys_that_work_in_the_current_focus(self):
         # Break: the hint line keeps advertising list keys while typing, drops them entirely,
-        # or on an agent row still says Enter is needed when moving onto it selects it.
+        # hides Enter on an agent that is highlighted but not selected, or keeps advertising it
+        # for an agent that moving onto it already selected.
         app = self.app()
         footer = self.lines(app)[-1]
         self.assertIn("\u2191\u2193 Select", footer)
+        self.assertIn("Enter Select", footer)
         self.assertIn("g Focus", footer)
-        self.assertNotIn("Enter", footer)
+        self.assertIsNone(app.target)
         app.handle_key("tab")
         self.assertIn("Enter Preview and send", self.lines(app)[-1])
         app.handle_key("esc")
@@ -116,6 +118,21 @@ class AgentsTabTests(PanelFixture):
         app.handle_key("esc")
         app.handle_key("k")
         self.assertIn("Enter Fold", self.lines(app)[-1])
+        app.handle_key("j")
+        self.assertEqual(app.target["label"], "alpha-task")
+        self.assertNotIn("Enter", self.lines(app)[-1])
+        app.handle_key("j")
+        self.assertEqual(app.target["label"], "beta-task")
+        self.assertNotIn("Enter", self.lines(app)[-1])
+        app.handle_key("k")
+        self.assertNotIn("Enter", self.lines(app)[-1])
+
+    def test_enter_on_the_highlighted_unselected_agent_selects_it(self):
+        # Break: the footer offers Enter on the first agent at start-up but Enter does nothing.
+        app = self.app()
+        self.assertIsNone(app.target)
+        app.handle_key("enter")
+        self.assertEqual(app.target["label"], "alpha-task")
 
     # ---- search and filter -----------------------------------------------------------
     def test_search_matches_title_branch_and_project_and_esc_restores_the_list(self):

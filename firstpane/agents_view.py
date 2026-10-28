@@ -523,7 +523,9 @@ class AgentsMixin:
         else:
             hints = [("\u2191\u2193", "Select")]
             if row is not None and row["kind"] == "project":
-                hints.append(("Enter", "Fold"))  # moving onto an agent selects it: Enter is not needed there
+                hints.append(("Enter", "Fold"))
+            elif row is not None and row["kind"] == "agent" and not (self.target and tuple(self.target["key"]) == tuple(row["key"])):
+                hints.append(("Enter", "Select"))
             hints += [("g", "Focus"), ("Tab", "Message"), ("/", "Search"), ("f", "Filter")]
         out, used = "", 1
         for key, word in hints:

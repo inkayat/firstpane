@@ -402,6 +402,31 @@ class PrivateSourceTests(unittest.TestCase):
         self.assertIn("alpha-only.txt", text)
         self.assertNotIn("beta-only.txt", text)
 
+    def test_a_lone_agent_is_offered_enter_until_it_is_selected(self):
+        # Break: with one agent the list has nowhere to move, so the highlighted agent stays
+        # unselected and the footer and the Browser tab give no way to select it.
+        tree = self.worktree(self.alpha, self.root / "alpha-wt", "fm/solo")
+        (tree / "solo-only.txt").write_text("x\n")
+        row = pane(pane_id="w1:p1", terminal_id="term_solo", workspace_id="w1", tab_id="w1:t1",
+                   cwd=str(tree), foreground_cwd=str(tree))
+        self.rows.append(row)
+        self.agents.append(agent_for(row, name="claude"))
+        self.workspaces.append(workspace("w1", "alpha", number=1))
+        self.transport.snapshot = snapshot(self.workspaces, self.rows, self.agents)
+        app = App(config=Config(socket_path=self.config.socket_path), transport=self.transport, state_dir=self.root / "state",
+                  env=self.env, clock=Clock(), terminal=FakeTerminal(), rows=60, cols=120)
+        app.refresh(manual=True)
+        self.assertIsNone(app.target)
+        self.assertIn("Enter Select", strip_sgr(app.render()).splitlines()[-1])
+        app.handle_key("3")
+        self.assertIn("press Enter", strip_sgr(app.render()))
+        app.handle_key("1")
+        app.handle_key("enter")
+        self.assertIsNotNone(app.target)
+        self.assertNotIn("Enter", strip_sgr(app.render()).splitlines()[-1])
+        app.handle_key("2")
+        self.assertIn("solo-only.txt", strip_sgr(app.render()))
+
 
 if __name__ == "__main__":
     unittest.main()
