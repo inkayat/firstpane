@@ -501,14 +501,12 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
             self._cycle_filter()
         elif key in ("tab", "m") and self.tab == "agents":
             self._open_agent_composer(rows[index] if rows else None)
-        elif key in ("j", "down") and rows:
-            index = min(index + 1, len(rows) - 1)
+        elif key in ("j", "down", "k", "up") and rows:
+            index = min(index + 1, len(rows) - 1) if key in ("j", "down") else max(index - 1, 0)
             self._set_cursor(rows[index]["key"])
             self._remember(rows[index])
-        elif key in ("k", "up") and rows:
-            index = max(index - 1, 0)
-            self._set_cursor(rows[index]["key"])
-            self._remember(rows[index])
+            if rows[index]["kind"] == "agent":
+                self._select_target(rows[index], force=False)
         elif key == "enter" and rows:
             self._activate(rows[index])
         elif key == "g" and rows:
@@ -837,8 +835,9 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
         if row["kind"] == "agent":
             self._select_target(row)
 
-    def _select_target(self, row):
-        """Enter on an agent selects it in this panel; `g` focuses its pane."""
+    def _select_target(self, row, force=True):
+        """Moving onto an agent, Enter or a click selects it in this panel; `g` focuses its pane.
+        A move (`force` False) re-reads no workspace that is not due, so a held arrow key starts no git burst."""
         if self.target and tuple(self.target["key"]) == tuple(row["key"]):
             return
         self._close_inline()
@@ -848,7 +847,7 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
         self.changes_cursor = 0
         self.changes_pick = None
         self.changes_menu = None
-        self._schedule_workspaces(force=True)
+        self._schedule_workspaces(force=force)
 
     def _verify_live(self, row):
         """Re-read the pane and its FirstMate claim: None, or closed / moved / unproven."""

@@ -320,6 +320,88 @@ class LayoutTests(PanelFixture):
         self.assertIn("Alpha task", plain(app.render()))
 
 
+class CursorSelectionTests(PanelFixture):
+    """The agent under the Agents tab's cursor is the selected agent: no Enter is needed."""
+
+    def changes(self, app):
+        """The Changes tab's frame, then back to the Agents tab."""
+        app.handle_key("2")
+        frame = plain(app.render())
+        app.handle_key("1")
+        return frame
+
+    def test_moving_onto_an_agent_shows_its_changes_and_details_without_enter(self):
+        # Break: Changes and its header stay on the agent chosen earlier (or on none) until
+        # Enter is pressed, or moving between rows touches a pane or FirstMate's message box.
+        self.fx.write("alpha-only.txt", "a\n", root=self.wt_a)
+        self.fx.write("beta-only.txt", "b\n", root=self.wt_b)
+        app = self.app()
+        calls = len(self.transport.socket_calls)
+        app.handle_key("j")
+        frame = self.changes(app)
+        lines = frame.splitlines()
+        self.assertIn("/ beta-task", lines[1])
+        self.assertIn("fm/beta-task", lines[1])
+        self.assertIn("working \u00b7 1 file", lines[2])
+        self.assertIn("wt-b (fm)", lines[2])
+        self.assertIn("beta-only.txt", frame)
+        self.assertNotIn("alpha-only.txt", frame)
+        app.handle_key("k")
+        frame = self.changes(app)
+        lines = frame.splitlines()
+        self.assertIn("/ alpha-task", lines[1])
+        self.assertIn("wt-a (fm)", lines[2])
+        self.assertIn("alpha-only.txt", frame)
+        self.assertNotIn("beta-only.txt", frame)
+        self.assertEqual(self.transport.socket_calls[calls:], [])
+        self.assertEqual(self.main.received, [])
+        self.assertEqual(self.transport.inbox, [])
+
+    def test_a_late_read_for_the_agent_moved_away_from_never_shows_for_the_one_moved_to(self):
+        # Break: alpha's diff or counts, read before the cursor moved on, land afterwards and
+        # are shown as beta's; or beta's own diff never replaces them.
+        self.fx.write("README.md", "one\nALPHA\nthree\n", root=self.wt_a)
+        self.fx.write("README.md", "one\nBETA\nthree\n", root=self.wt_b)
+        app = self.app()
+        app.handle_key("enter")
+        held = []
+
+        def submit(fn):
+            future = Future()
+            held.append((future, fn))
+            return future
+
+        app.submit = submit
+        self.assertIn("reading diff...", self.changes(app))
+        app.handle_key("j")
+        app.handle_key("2")
+        frame = plain(app.render())
+        self.assertIn("/ beta-task", frame.splitlines()[1])
+        self.assertEqual(len(held), 4)  # a diff and a counts read for each agent, alpha's first
+        for future, read in held[:2]:
+            future.set_result(read())
+        frame = plain(app.render())
+        self.assertNotIn("ALPHA", frame)
+        self.assertIn("reading diff...", frame)
+        for future, read in held[2:]:
+            future.set_result(read())
+        frame = plain(app.render())
+        self.assertIn("+ BETA", frame)
+        self.assertNotIn("ALPHA", frame)
+
+    def test_moving_through_agents_reads_no_workspace_before_it_is_due(self):
+        # Break: every cursor move re-reads every listed agent's Git state, so holding an
+        # arrow key starts a burst of git subprocesses.
+        app = self.app()
+        reads = []
+        app.submit = lambda fn: reads.append(fn) or Future()
+        for key in "jkjkj":
+            app.handle_key(key)
+            app.render()
+        self.assertEqual(reads, [])
+        self.assertEqual((app.target or {}).get("label"), "beta-task")
+
+
 class ChangesTests(PanelFixture):
     def test_changes_shows_the_picked_file_with_counts_and_a_numbered_old_new_diff(self):
         # Break: the file picker or the per-file +/- counts are wrong, untracked files are not

@@ -101,10 +101,13 @@ class AgentsTabTests(PanelFixture):
         self.assertIn("from a click", self.frame(app))
 
     def test_the_footer_names_the_keys_that_work_in_the_current_focus(self):
-        # Break: the hint line keeps advertising list keys while typing, or drops them
-        # entirely.
+        # Break: the hint line keeps advertising list keys while typing, drops them entirely,
+        # or on an agent row still says Enter is needed when moving onto it selects it.
         app = self.app()
-        self.assertIn("Enter Workspace", self.lines(app)[-1])
+        footer = self.lines(app)[-1]
+        self.assertIn("\u2191\u2193 Select", footer)
+        self.assertIn("g Focus", footer)
+        self.assertNotIn("Enter", footer)
         app.handle_key("tab")
         self.assertIn("Enter Preview and send", self.lines(app)[-1])
         app.handle_key("esc")

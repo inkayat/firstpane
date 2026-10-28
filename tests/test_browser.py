@@ -729,6 +729,21 @@ class BrowserTabTests(unittest.TestCase):
         self.assertEqual(self.launch()["argv"], ["open", URL_B])
         self.assertEqual(self.stored_drafts(), [])
 
+    def test_moving_the_cursor_to_an_agent_opens_its_browser_on_the_tab_without_enter(self):
+        # Break: the Browser tab keeps opening the agent chosen earlier until Enter is pressed
+        # on the one under the cursor, or merely moving between rows starts or stops a browser.
+        self.open_tab("alpha-task")
+        alpha = self.launch()
+        self.app.handle_key("1")
+        self.app.handle_key("j")
+        self.app.render()
+        self.assertTrue(alive(alpha["pid"]))
+        self.assertEqual(self.launch(), alpha)
+        self.app.handle_key("3")
+        self.pump(lambda: self.running() and (self.app.placed.owner() or {}).get("label") == "beta-task")
+        self.assertIn("wt-b", self.app.placed.owner()["source"])
+        self.assertFalse(alive(alpha["pid"]))
+
     def test_x_closes_the_browser_and_remembers_its_address(self):
         # Break: `x` leaves the browser running, or the next open starts blank.
         self.open_tab("alpha-task")
