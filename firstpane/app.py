@@ -1544,6 +1544,7 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
         self._poll_capture()
         self._poll_pr_details()
         self._poll_board()
+        self._poll_origins()
         self._poll_board_detail()
         self._poll_review()
         if hasattr(self, "_terminal_pump"):

@@ -435,8 +435,9 @@ class AgentsEntryTests(BadgeFixture):
         # Break: a failed show is treated as an unrecorded origin and the call is counted or opened unverified.
         app = self.linked_app(["call-a"], {}, ["call-a"], failing=("call-a",))
         self.assertNotIn("\u26a0", self.plain_tab(app))
+        self.assertIn("Agents ?", self.plain_tab(app))
         app.handle_key("enter")
-        self.assertEqual(app.status, "no linked Board task")
+        self.assertEqual(app.status, "still reading Board links")
         self.transport.handlers.insert(0, (
             lambda argv: len(argv) > 1 and argv[1] == "show" and "--full" in argv,
             lambda call: CmdResult(0, show_text("call-a", body="Ready.")),
@@ -463,6 +464,108 @@ class AgentsEntryTests(BadgeFixture):
         self.tasks[0]["updated_at"] = "2026-10-29T09:00:00Z"
         self.reload_board(app)
         self.assertEqual(reads(), opened + 1)
+
+    def deferred_app(self, jobs):
+        from concurrent.futures import Future
+        from firstpane.app import App
+        from tests.support import FakeTerminal
+
+        def submit(fn):
+            future = Future()
+            jobs.append((fn, future))
+            return future
+
+        app = App(self.config, self.transport, self.state, self.env, self.clock, FakeTerminal(),
+                  rows=32, cols=120, submit=submit, wall=lambda: 1_700_000_100)
+        return app
+
+    def run_job(self, jobs, index):
+        fn, future = jobs[index]
+        future.set_result(fn())
+
+    def test_a_blocked_origin_read_neither_delays_the_board_rows_nor_certifies_a_clear_zero(self):
+        # Break: the origin reads run inside the list job, or an unread origin lets the badge say nothing is waiting.
+        worker = "alter-050-team-lead"
+        self.tasks[:] = [task("call-a", "Call a", "waiting_review", review=True)]
+        self.transport.handlers.insert(0, (
+            lambda argv: argv[-2:] == ["list", "--json"],
+            lambda call: CmdResult(0, json.dumps(self.tasks), "fm-board: reconcile coverage: inventory"),
+        ))
+        self.transport.handlers.insert(0, (
+            lambda argv: len(argv) > 1 and argv[1] == "show" and "--full" in argv,
+            lambda call: CmdResult(0, show_text("call-a", body="Ready.\\nCaptain hold origin: " + worker)),
+        ))
+        write_meta(
+            self.home, worker, project="/work/firstpane", herdr_session="lab",
+            herdr_workspace_id="w1", herdr_tab_id="w1:t1", herdr_pane_id="pane-a",
+            endpoint_task_id=worker, decision_keys="call-a",
+        )
+        jobs = []
+        app = self.deferred_app(jobs)
+        app.refresh(manual=True)
+        app.handle_key("1")
+        row = self.waiting_row(ident=worker)
+        app.session = "lab"
+        app.projects = [{"key": "firstpane", "label": "firstpane", "agents": [row]}]
+        app.selection_key = row["key"]
+        self.assertEqual(len(jobs), 1)
+        self.run_job(jobs, 0)
+        app.poll()
+        self.assertEqual(self.named("fm-tasks-axi.sh", "show"), [])
+        self.assertEqual(len(jobs), 2)
+        self.assertEqual(app.board_tasks[0]["id"], "call-a")
+        self.assertTrue(app.board_have_list)
+        self.assertIn("Agents ?", self.plain_tab(app))
+        self.assertNotIn("\u26a0", self.plain_tab(app))
+        app.handle_key("enter")
+        self.assertEqual(app.tab, "agents")
+        self.assertEqual(app.status, "still reading Board links")
+        self.run_job(jobs, 1)
+        app.poll()
+        self.assertIn("Agents \u26a0 1", self.plain_tab(app))
+        app.handle_key("enter")
+        self.assertEqual(app.board_selected, "call-a")
+
+    def test_a_read_that_lands_after_a_newer_list_is_dropped(self):
+        # Break: an origin read for an older list certifies a link in the newer one.
+        worker = "alter-050-team-lead"
+        self.tasks[:] = [task("call-a", "Call a", "waiting_review", review=True)]
+        self.transport.handlers.insert(0, (
+            lambda argv: argv[-2:] == ["list", "--json"],
+            lambda call: CmdResult(0, json.dumps(self.tasks), "fm-board: reconcile coverage: inventory"),
+        ))
+        origin = {"value": "someone-else"}
+        self.transport.handlers.insert(0, (
+            lambda argv: len(argv) > 1 and argv[1] == "show" and "--full" in argv,
+            lambda call: CmdResult(0, show_text("call-a", body="Ready.\\nCaptain hold origin: " + origin["value"])),
+        ))
+        write_meta(
+            self.home, worker, project="/work/firstpane", herdr_session="lab",
+            herdr_workspace_id="w1", herdr_tab_id="w1:t1", herdr_pane_id="pane-a",
+            endpoint_task_id=worker, decision_keys="call-a",
+        )
+        jobs = []
+        app = self.deferred_app(jobs)
+        app.refresh(manual=True)
+        row = self.waiting_row(ident=worker)
+        app.session = "lab"
+        app.projects = [{"key": "firstpane", "label": "firstpane", "agents": [row]}]
+        self.run_job(jobs, 0)
+        app.poll()
+        stale_origin_job = len(jobs) - 1
+        self.tasks[0]["updated_at"] = "2026-10-29T09:00:00Z"
+        origin["value"] = worker
+        app._refresh_board(force=True)
+        self.run_job(jobs, len(jobs) - 1)
+        app.poll()
+        self.run_job(jobs, stale_origin_job)
+        app.poll()
+        self.assertEqual(app.board_origins, {})
+        self.assertEqual(app.board_origin_unread, ["call-a"])
+        self.run_job(jobs, len(jobs) - 1)
+        app.poll()
+        self.assertEqual(app.board_origins, {"call-a": worker})
+        self.assertEqual(app.board_origin_unread, [])
 
     def test_enter_on_a_waiting_agent_opens_its_linked_task_and_esc_returns(self):
         # Break: Enter stays on Agents, opens a different task, clears the warning, or Esc lands in Board lanes.

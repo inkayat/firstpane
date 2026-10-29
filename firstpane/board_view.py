@@ -77,6 +77,10 @@ class BoardMixin:
         self.board_metas = []
         self.board_origin_cache = {}
         self.board_origins = {}
+        self.board_origin_unread = []
+        self.board_origin_job = None
+        self.board_origin_gen = 0
+        self.board_origin_tried = set()
         self.agents_board_return = None
 
     def _board_env(self):
@@ -109,7 +113,7 @@ class BoardMixin:
             self.board_loaded_at,
             self.clock(),
         )
-        current = fresh and self.board_coverage
+        current = fresh and self.board_coverage and not self.board_origin_unread
         count = len(waiting_agent_ids(self.board_tasks, self._listed_agents(), self.board_metas, self.board_origins))
         return badge_suffix("fresh" if current else "stale", count, narrow)
 
@@ -154,46 +158,67 @@ class BoardMixin:
         if tasks is None:
             return {"kind": "list", "error": "list returned no JSON", "stderr": result.stderr, "summary": summary}
         tasks = attach_projection(tasks, self._read_projection())
-        metas = load_metas(self.config.firstmate_home)
         return {
             "kind": "list",
             "tasks": tasks,
-            "metas": metas,
-            "origin_cache": self._read_origins(tasks, metas, self.board_origin_cache),
+            "metas": load_metas(self.config.firstmate_home),
             "stderr": result.stderr,
             "summary": summary,
             "source": "list",
         }
 
-    def _read_origins(self, tasks, metas, known):
-        """Hold origins of the open calls the metas name as decision keys, read off the UI thread.
-
-        An entry is reused while the task's `updated_at` is unchanged. A call whose
-        read failed has no entry, so it is not a link until a later read succeeds.
-        """
-        pending = set(pending_request_ids(tasks))
-        stamps = {task.get("id"): task.get("updated_at") for task in tasks}
-        wanted = []
-        for meta in metas:
+    def _origin_wanted(self):
+        """Open calls the metas name as decision keys, with the `updated_at` that qualifies a read origin."""
+        pending = set(pending_request_ids(self.board_tasks))
+        stamps = {task.get("id"): task.get("updated_at") for task in self.board_tasks}
+        wanted = {}
+        for meta in self.board_metas:
             for key in meta.get("decision_keys") or []:
-                if key != meta.get("task_id") and key in pending and key not in wanted:
-                    wanted.append(key)
-        cache = {}
-        reads = 0
-        for key in wanted:
-            stamp = stamps.get(key)
-            held = known.get(key)
-            if held and stamp and held["stamp"] == stamp:
-                cache[key] = held
-                continue
-            if reads >= ORIGIN_LOOKUPS:
-                continue
-            reads += 1
+                if key != meta.get("task_id") and key in pending:
+                    wanted[key] = stamps.get(key)
+        return wanted
+
+    def _settle_origins(self):
+        """Keep the origins that still describe the listed calls and start a read for the rest."""
+        wanted = self._origin_wanted()
+        kept = {}
+        for key, stamp in wanted.items():
+            held = self.board_origin_cache.get(key)
+            if held and held["stamp"] == stamp and (stamp is not None or held["gen"] == self.board_origin_gen):
+                kept[key] = held
+        self.board_origin_cache = kept
+        self.board_origins = {key: held["origin"] for key, held in kept.items()}
+        self.board_origin_unread = [key for key in wanted if key not in kept]
+        if self.board_origin_job is not None:
+            return
+        keys = [key for key in self.board_origin_unread if key not in self.board_origin_tried][:ORIGIN_LOOKUPS]
+        if not keys:
+            return
+        self.board_origin_tried.update(keys)
+        gen = self.board_origin_gen
+        stamps = {key: wanted[key] for key in keys}
+        self.board_origin_job = self.submit(lambda: self._read_origins(gen, stamps))
+
+    def _read_origins(self, gen, stamps):
+        reads = {}
+        for key, stamp in stamps.items():
             result = self._origin_read(key)
-            if result is None:
-                continue
-            cache[key] = {"stamp": stamp, "origin": result[0]}
-        return cache
+            if result is not None:
+                reads[key] = {"stamp": stamp, "origin": result[0], "gen": gen}
+        return {"gen": gen, "reads": reads}
+
+    def _poll_origins(self):
+        job = self.board_origin_job
+        if job is None or not job.done():
+            return
+        self.board_origin_job = None
+        try:
+            result = job.result()
+        except Exception:
+            result = {"gen": None, "reads": {}}
+        if result.get("gen") == self.board_origin_gen:
+            self.board_origin_cache.update(result.get("reads") or {})
+        self._settle_origins()
 
     def _origin_read(self, request_id):
         """`(origin,)` for the held task, origin None when it records none; None when it could not be read."""
@@ -261,8 +286,9 @@ class BoardMixin:
         self.board_have_list = True
         self.board_tasks = result.get("tasks") or []
         self.board_metas = result.get("metas") or []
-        self.board_origin_cache = result.get("origin_cache") or {}
-        self.board_origins = {key: held["origin"] for key, held in self.board_origin_cache.items()}
+        self.board_origin_gen += 1
+        self.board_origin_tried = set()
+        self._settle_origins()
         self.board_source = result.get("source") or "list"
         self.board_generated_at = None
         self._after_list(snap, first)
@@ -945,7 +971,7 @@ class BoardMixin:
     def _open_linked_board(self, row):
         task_id = self._linked_task_id(row)
         if not task_id:
-            self.status = "no linked Board task"
+            self.status = "still reading Board links" if self.board_origin_unread else "no linked Board task"
             return
         self.agents_board_return = {
             "key": self.selection_key,
