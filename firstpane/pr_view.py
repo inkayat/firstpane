@@ -466,6 +466,7 @@ class PullRequestsMixin:
         self.pr_expanded = set()
         self.pr_details = {}
         self.pr_association = None
+        self._recorded_pulls = {}
         self._pr_jobs = {}
         self._pr_top = 0
         self._pr_follow = True
@@ -505,8 +506,11 @@ class PullRequestsMixin:
         task_id = (target or {}).get("task_id")
         if not task_id or not hasattr(self, "_meta"):
             return None
-        meta = self._meta(task_id)
-        return parse_pr_url((meta or {}).get("pr"))
+        now = self.clock()
+        cached = self._recorded_pulls.get(task_id)
+        if cached is None or now - cached[0] >= PR_DETAIL_CADENCE:
+            cached = self._recorded_pulls[task_id] = (now, parse_pr_url((self._meta(task_id) or {}).get("pr")))
+        return cached[1]
 
     def _row_slug(self, row):
         return f"{row.get('host')}/{row.get('owner')}/{row.get('repo')}"
@@ -548,7 +552,7 @@ class PullRequestsMixin:
                 recorded_pr = next((row for row in rows if row["number"] == recorded["number"]), None)
                 if recorded_pr is None:
                     recorded_note = "recorded pull request is not open"
-        branch_pr = next((row for row in rows if row.get("head") == branch), None) if branch_state == "known" and branch else None
+        branch_pr = next((row for row in rows if row.get("head") == branch and not row.get("cross_repository")), None) if branch_state == "known" and branch else None
         if branch_state == "unknown":
             if recorded_pr is not None:
                 return "pr", recorded_pr, None
@@ -558,6 +562,8 @@ class PullRequestsMixin:
         chosen = branch_pr or recorded_pr
         if chosen is not None:
             return "pr", chosen, None
+        if project.get("truncated"):
+            return "unknown", None, "more open pull requests than were listed"
         if branch_state == "detached":
             return "absent", None, recorded_note or "no pull request for this detached checkout"
         return "absent", None, recorded_note or "no pull request for this branch"
@@ -572,8 +578,10 @@ class PullRequestsMixin:
     def _current_pr(self):
         """The pull request associated with the selected agent, or None. A saved or previously
         chosen pull request is not reused when it is not that association."""
-        _kind, pr, reason = self._associated_pr()
+        kind, pr, reason = self._associated_pr()
         self.pr_association = reason
+        if kind == "unknown":
+            return None
         key = tuple(pr["key"]) if pr else None
         held = tuple(self.pr_choice) if self.pr_choice else None
         if held != key:

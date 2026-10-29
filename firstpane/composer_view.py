@@ -5,8 +5,8 @@ The Agents field's draft is keyed by the agent alone. An inline message is opene
 range (Changes tab), a captured browser selection (Browser tab) or a pull request conversation
 (Pull Requests tab) and its editor is drawn right under it. Its draft is keyed by the selected
 agent and the selection itself, so it never moves to another agent, file, range or
-conversation; sending is one exact preview, then the message is put, unsent, into the FirstMate
-primary's own message box (firstpane.handoff) for the captain to send there.
+conversation; sending is one exact preview, then the message is queued for FirstMate with
+`fm-inbox.sh note`, to be picked up at its next check.
 """
 
 import hashlib
@@ -691,7 +691,7 @@ class ComposerMixin:
             rows.extend((lead + paint("> " + line, rgb_fg(MUTED), plain), hit) for line in excerpt[:EXCERPT_ROWS] if line)
         avail = max(4, self.cols - indent - 4)
         rows.extend((lead + line, hit) for line in self._editor_lines(plain, avail))
-        rows.append((lead + paint("Enter previews for FirstMate's message box · Esc keeps the draft", rgb_fg(MUTED), plain), hit))
+        rows.append((lead + paint("Enter previews for FirstMate's queue · Esc keeps the draft", rgb_fg(MUTED), plain), hit))
         return rows
 
     def _editor_lines(self, plain, avail):

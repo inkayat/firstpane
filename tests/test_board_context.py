@@ -10,7 +10,7 @@ import unittest
 
 from firstpane import board
 from firstpane.style import YELLOW
-from tests.support import CmdResult, FakePi, write_meta
+from tests.support import CmdResult, FakePi, strip_sgr, write_meta
 from tests.test_board_layout import LayoutFixture, task
 
 YELLOW_SGR = "38;2;%d;%d;%d" % YELLOW
@@ -892,6 +892,18 @@ class ReplyTests(DetailFixture):
         self.tasks[0]["captain_review"] = False
         app.handle_key("r")
         self.assertNotIn("\u26a0", self.plain_tab(app))
+
+    def test_a_queued_reply_is_described_as_queued_not_as_put_in_a_message_box(self):
+        # Break: the detail keeps saying the reply sits in FirstMate's message box, or says nothing about the queued reply.
+        app = self.ready()
+        self.bind_waiting(app)
+        self.type_send(app)
+        app.handle_key("y")
+        app.handle_key("esc")
+        app.handle_key("enter")
+        text = self.plain_tab(app) + "\n" + strip_sgr(app.render())
+        self.assertNotIn("message box", text)
+        self.assertIn("Your reply was queued for FirstMate", text)
 
     def test_viewing_drafting_and_cancelling_do_not_resolve_or_write(self):
         # Break: Enter, typing, preview or cancel records an answer or drops the count.

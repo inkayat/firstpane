@@ -1403,7 +1403,7 @@ class BoardMixin:
         if not ident or not lifecycle:
             return None
         finished = self.drafts.latest_finished("board:" + ident)
-        if not finished or finished.get("outcome") != "transferred":
+        if not finished or finished.get("outcome") not in ("queued", "already-queued"):
             return None
         attached = self._board_request_attachment(finished)
         if not attached or attached.get("lifecycle") != lifecycle:
@@ -1411,7 +1411,7 @@ class BoardMixin:
         age = ""
         if finished.get("finished_at") is not None:
             age = " " + age_label(max(0, self.clock() - finished["finished_at"]))
-        return "Your reply was put in FirstMate's message box" + age + ". Press Enter there. The request stays open until FirstMate records it."
+        return "Your reply was queued for FirstMate" + age + ". The request stays open until FirstMate records it."
 
     def _detail_links(self, add, card, data, plain):
         urls = []

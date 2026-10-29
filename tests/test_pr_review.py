@@ -270,6 +270,58 @@ class AssociatedPullRequestTests(ReviewFixture):
         self.assertFalse(app.pr_diff_open)
         self.assertNotIn("SIDEBAR_LINE", text)
 
+    def test_a_truncated_open_list_is_not_reported_as_no_pull_request(self):
+        # Break: the agent's own PR lies beyond the fetched window and the page says there is none.
+        self.branch_head = "fm/alpha-task"
+        self.lists["alpha"] = [listed(100 + index, f"Other {index}", f"fm/other-{index}") for index in range(21)]
+        text = self.text(self.app())
+        self.assertIn("more open pull requests than were listed", text)
+        self.assertNotIn("no pull request for this branch", text)
+        self.assertNotIn("Other 0", text)
+
+    def test_a_fork_pull_request_with_the_same_branch_name_is_not_the_agents(self):
+        # Break: an unrelated contributor's fork PR on a same-named branch is shown as the agent's work.
+        self.branch_head = "fm/alpha-task"
+        self.lists["alpha"] = [dict(listed(9, "Agent branch work", "fm/alpha-task"), isCrossRepository=True)]
+        text = self.text(self.app())
+        self.assertIn("no pull request for this branch", text)
+        self.assertNotIn("Agent branch work", text)
+        self.assertTrue(any("isCrossRepository" in part for call in self.gh_calls() if "list" in call["argv"] for part in call["argv"]))
+
+    def test_a_failed_refresh_keeps_the_open_diff_of_the_same_pull_request(self):
+        # Break: one gh failure at the next refresh closes the diff the reader is in.
+        self.branch_head = "fm/alpha-task"
+        app = self.app()
+        app.handle_key("d")
+        self.assertTrue(app.pr_diff_open)
+        self.lists["alpha"] = None
+        app.refresh(manual=True)
+        app.poll()
+        self.assertIn("PRs unavailable: gh failed", self.text(app))
+        self.assertTrue(app.pr_diff_open)
+        self.lists["alpha"] = [listed(9, "Agent branch work", "fm/alpha-task")]
+        app.refresh(manual=True)
+        app.poll()
+        self.assertIn("#9", self.text(app))
+        self.assertTrue(app.pr_diff_open)
+        self.assertIsNotNone(app.diff_view)
+
+    def test_the_recorded_task_file_is_not_read_on_every_frame(self):
+        # Break: each render rescans the FirstMate meta files for the recorded pull request.
+        self.branch_head = "fm/alpha-task"
+        write_meta(
+            self.home, "alpha-task", project=str(self.projects / "alpha"), herdr_session="lab",
+            herdr_workspace_id="w1", herdr_tab_id="w1:t1", herdr_pane_id="w1:p1", endpoint_task_id="alpha-task",
+            worktree=str(self.worktree), pr="https://github.com/acme/alpha/pull/9",
+        )
+        app = self.app()
+        reads = []
+        original = app._meta
+        app._meta = lambda task_id: (reads.append(task_id), original(task_id))[1]
+        for _ in range(5):
+            self.text(app)
+        self.assertEqual(reads, [])
+
     def test_a_saved_unrelated_choice_is_not_restored(self):
         # Break: a pull request chosen for another agent is still the page on the next render.
         self.branch_head = "fm/alpha-task"

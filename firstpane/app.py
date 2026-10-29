@@ -2,7 +2,7 @@
 
 Layout: a tab row (Agents, Review, Board, Terminal, Browser) and a header Settings control.
 Review shows the selected agent's workspace or a pull request. Messages to FirstMate are written
-inline and pasted unsent. The Terminal tab is a new empty shell in the selected agent's directory.
+inline and queued with `fm-inbox.sh`. The Terminal tab is a new empty shell in the selected agent's directory.
 """
 
 import json
@@ -21,7 +21,7 @@ from firstpane.changes_view import HIDDEN_HEADERS, ChangesMixin
 from firstpane.composer_view import ComposerMixin, note_outcome
 from firstpane.drafts import DraftStore
 from firstpane.frames import FrameMedium
-from firstpane.fmmeta import display_labels, load_metas
+from firstpane.fmmeta import display_labels, load_meta, load_metas
 from firstpane.gitremote import choose_remote, parse_git_remote_url
 from firstpane.icons import NO_GRAPHICS, HarnessIcons
 from firstpane.input import InputDecoder
@@ -1373,10 +1373,7 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
         return None
 
     def _meta(self, task_id):
-        for meta in load_metas(self.config.firstmate_home):
-            if meta["task_id"] == task_id:
-                return meta
-        return None
+        return load_meta(self.config.firstmate_home, task_id)
 
     def _refresh_prs(self, force):
         """Fetch the selected agent's repository only, while the Pull Request source is showing."""
@@ -1493,7 +1490,7 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
                 "--limit",
                 str(LIST_LIMIT),
                 "--json",
-                "number,title,isDraft,reviewDecision,statusCheckRollup,headRefName,updatedAt",
+                "number,title,isDraft,reviewDecision,statusCheckRollup,headRefName,isCrossRepository,updatedAt",
             ],
             env=self._gh_env(),
             timeout=LIST_TIMEOUT,
@@ -1539,6 +1536,7 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
             "slug": choice.slug,
             "title": title,
             "head": sanitize(item.get("headRefName") or ""),
+            "cross_repository": item.get("isCrossRepository") is True,
         }
 
     def _selected_pr(self, row):
