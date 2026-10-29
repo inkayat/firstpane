@@ -110,7 +110,7 @@ class BoardPtyTests(unittest.TestCase):
         term = self.open(32, 120)
         term.wait_for(lambda screen: "Agents" in screen.text())
         term.send(b"3")
-        term.wait_for(lambda screen: "Keyboard shortcuts" in screen.text() and "TODO" in screen.text())
+        term.wait_for(lambda screen: "Keyboard shortcuts" in screen.text() and "Done (1)" in screen.text())
         text = term.screen.text()
         self.assertIn("Working", text)
         self.assertIn("Waiting Review", text)
