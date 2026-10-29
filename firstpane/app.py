@@ -727,8 +727,6 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
             self._arm_browser(rows[index])
         elif key == "c" and rows:
             self._arm_comment(rows[index])
-        elif key == "m" and rows and self._on("prs"):
-            self._arm_note(rows[index])
 
     # ---- layout ----------------------------------------------------------------------
     def render(self):
