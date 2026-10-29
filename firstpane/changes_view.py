@@ -770,7 +770,12 @@ class ChangesMixin:
                     continue
             elif (anchor.get("group"), anchor.get("path")) != (entry.group, entry.path):
                 continue
-            span = locate(anchor, lines)
+            if view.get("paths"):
+                own = [at for at, path in enumerate(view["paths"]) if path == anchor.get("path")]
+                found = locate(anchor, [lines[at] for at in own])
+                span = (own[found[0]], own[found[1]]) if found else None
+            else:
+                span = locate(anchor, lines)
             if self._footer_holds(draft):
                 continue
             if span is None:

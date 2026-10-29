@@ -186,6 +186,32 @@ class WorkspaceReviewTests(PanelFixture):
         self.assertEqual(app.status, "select lines of one file to write about")
         self.assertIsNone(app.draft)
 
+    def test_a_commit_draft_sits_under_its_own_files_identical_row_and_goes_stale_with_it(self):
+        # Break: a draft on two.txt line 1 is drawn under one.txt's identical "+x" row, and never
+        # reported stale when two.txt's own row is gone.
+        self.fx.write("one.txt", "x\n", root=self.wt_a)
+        self.fx.write("two.txt", "x\n", root=self.wt_a)
+        self.fx.git(self.wt_a, "add", "one.txt", "two.txt")
+        self.fx.git(self.wt_a, "commit", "-q", "-m", "same row twice")
+        oid = self.fx.head(self.wt_a)
+        app = self.app()
+        self.open_changes(app)
+        app._menu_pick(("rev", oid))
+        view = app.diff_view
+        second = next(index for index, line in enumerate(view["lines"]) if view["paths"][index] == "two.txt" and line.kind == "+")
+        view["cursor"], view["mark"] = second, None
+        app._open_diff_message()
+        app.composer.text = "about two"
+        app.handle_key("esc")
+        rows = self.lines(app)
+        marks = [index for index, line in enumerate(rows) if "+ x" in line]
+        draft_row = next(index for index, line in enumerate(rows) if "about two" in line)
+        self.assertEqual(draft_row, marks[1] + 1)
+        draft = app.drafts.open_drafts()[0]
+        draft["anchor"]["rows"][0][3] = "changed"
+        stale = [text for text, _ in app._diff_rows(True, 40, [draft])]
+        self.assertTrue(any("about two" in text for text in stale[:1]), stale)
+
     def test_switching_agent_drops_the_commit_pin_and_the_other_agents_findings(self):
         # Break: the pinned commit runs in another repository, or agent A's findings are drawn
         # on agent B's diff.
