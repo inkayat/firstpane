@@ -18,6 +18,7 @@ class TermGrid:
         self.visible = True
 
     def apply(self, data, full, width, height):
+        kept = (self.width, self.height, [row[:] for row in self.cells], self.row, self.col, self.sgr, self.visible)
         if width != self.width or height != self.height:
             self._alloc(width, height)
         elif full:
@@ -26,9 +27,8 @@ class TermGrid:
             return None
         try:
             self._feed(data.decode("utf-8"))
-        except UnicodeDecodeError:
-            return "unsupported"
         except ValueError:
+            self.width, self.height, self.cells, self.row, self.col, self.sgr, self.visible = kept
             return "unsupported"
         return None
 
@@ -87,7 +87,7 @@ class TermGrid:
             if char == "\x1b":
                 index = self._escape(text, index)
                 continue
-            if ord(char) < 32:
+            if ord(char) < 32 or 0x7F <= ord(char) < 0xA0:
                 raise ValueError("c0")
             self._put(char)
             index += 1

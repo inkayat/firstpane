@@ -17,7 +17,7 @@ from firstpane.board_view import BoardMixin
 from firstpane.browser import Browser
 from firstpane.browser_view import BrowserTabMixin
 from firstpane.cells import fit, width, wrap
-from firstpane.changes_view import ChangesMixin
+from firstpane.changes_view import HIDDEN_HEADERS, ChangesMixin
 from firstpane.composer_view import ComposerMixin, note_outcome
 from firstpane.drafts import DraftStore
 from firstpane.frames import FrameMedium
@@ -28,7 +28,7 @@ from firstpane.input import InputDecoder
 from firstpane.lineedit import LineEdit
 from firstpane.placed import PlacedBrowser
 from firstpane.pr_view import SECTIONS as PR_SECTIONS, PullRequestsMixin, checks_label, file_section, review_label
-from firstpane.review import ReviewSupervisor, build_request, mark_findings, review_scope, selected_skills, skill_catalog, validate_result
+from firstpane.review import ReviewSupervisor, build_request, mark_findings, patch_files, patch_line_paths, review_scope, selected_skills, skill_catalog, validate_result
 from firstpane.sanitize import sanitize
 from firstpane.scope import path_in_scope, scope_root
 from firstpane.sessionname import session_from_socket_path
@@ -36,6 +36,7 @@ from firstpane.settings_view import SettingsMixin, migrate_ui_state
 from firstpane.style import INK, MUTED, PINK, frame_lines, no_color, paint, rgb_fg
 from firstpane.tabs import SETTINGS_KEY, SOURCE_KEY, TAB_LABELS, TAB_SHORT, TABS
 from firstpane.terminal_view import TerminalMixin
+from firstpane.workspace import FileEntry, parse_diff
 
 SNAPSHOT_TIMEOUT = 3
 CELL_QUERY = "\x1b[16t"
@@ -130,6 +131,11 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
         self.review_source = "workspace"
         self.review_skills = []
         self.review_findings = []
+        self.review_supervisor = None
+        self.review_origin = None
+        self.review_jumps = []
+        self.revision_oid = None
+        self.revision_parent = None
         self.settings_open = False
         self._parked_diff = {"workspace": None, "pr": None}
         self._keyboard = "list"
@@ -436,10 +442,12 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
             return self.tab == "review" and self.review_source == "pr"
         return self.tab == name
 
-    def _set_review_source(self, source):
+    def _set_review_source(self, source, record=True):
         """Switch Workspace / Pull Request without clearing the other source's position."""
         if source not in ("workspace", "pr") or source == self.review_source:
             return
+        if record:
+            self._record_jump()
         self._parked_diff[self.review_source] = self.diff_view
         self.review_source = source
         self.diff_view = self._parked_diff.get(source)
@@ -447,16 +455,47 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
         self.pr_menu = None
         self._refresh_prs(force=False)
 
+    def _review_revision(self):
+        """What the shown diff is pinned to: a commit, the uncommitted state, or a PR head."""
+        if self.review_source == "pr":
+            return self.pr_commit_oid or "head"
+        return self.revision_oid or "uncommitted"
+
+    def _review_origin(self):
+        """Where a review result belongs; a result is shown only while this still holds."""
+        pr = self._current_pr() if self.review_source == "pr" else None
+        return (
+            tuple(self.target["key"]) if self.target else None,
+            self.review_source,
+            self._review_revision(),
+            tuple(pr["key"]) if pr else None,
+        )
+
     def _open_settings(self):
         self.settings_open = True
         self._settings_shown()
+
+    def _review_view(self):
+        """The shown diff when it is the one the current source, revision and PR pin; else {}."""
+        view = self.diff_view or {}
+        if not view.get("patch") or view.get("revision") != self._review_revision():
+            return {}
+        if self.review_source == "pr":
+            pr = self._current_pr()
+            if pr is None or view.get("pr") != tuple(pr["key"]):
+                return {}
+        return view
 
     def _arm_review(self):
         if getattr(self.config, "review", None) is None:
             self.status = "no review command configured"
             return
-        view = self.diff_view or {}
-        if not view.get("patch") or not view.get("entry"):
+        supervisor = self.review_supervisor
+        if supervisor is not None and supervisor.active():
+            self.status = "a review is already running"
+            return
+        view = self._review_view()
+        if not view:
             self.status = "nothing to review"
             return
         catalog = skill_catalog(self.config.review.skills, view.get("workspace"))
@@ -470,10 +509,9 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
 
     def _start_review(self):
         self.screen = "tree"
-        view = self.diff_view or {}
-        entry = view.get("entry")
+        view = self._review_view()
         review = getattr(self.config, "review", None)
-        if review is None or entry is None or not view.get("patch"):
+        if review is None or not view:
             self.status = "nothing to review"
             self.pending = None
             return
@@ -482,20 +520,21 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
             scope, revision = review_scope(
                 source=self.review_source,
                 mode=self.changes_scope,
-                head=view.get("head") or (pr or {}).get("head_oid"),
-                commit=getattr(self, "revision_oid", None),
-                parent=getattr(self, "revision_parent", None),
+                head=view.get("head"),
+                commit=self.revision_oid,
+                parent=self.revision_parent,
                 pr=pr,
-                pr_commit=getattr(self, "pr_commit_oid", None),
+                pr_commit=self.pr_commit_oid,
             )
+            catalog = skill_catalog(review.skills, view.get("workspace"))
             request = build_request(
                 run_id=secrets.token_hex(16),
                 created_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.wall())),
-                skills=[{"name": Path(path).name, "path": path, "skill_md_sha256": next(row["sha"] for row in skill_catalog(review.skills, view.get("workspace")) if row["path"] == path)} for path in selected_skills(self.review_skills, skill_catalog(review.skills, view.get("workspace")))],
+                skills=[{"name": Path(path).name, "path": path, "skill_md_sha256": next(row["sha"] for row in catalog if row["path"] == path)} for path in selected_skills(self.review_skills, catalog)],
                 repository={"path": view.get("workspace"), "remote": None},
                 scope=scope,
                 revision=revision,
-                files=[{"path": entry.path, "old_path": entry.orig, "status": "modified", "old_blob": None, "new_blob": None}],
+                files=patch_files(view["patch"]),
                 patch_text=view["patch"],
             )
         except ValueError as exc:
@@ -508,9 +547,12 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
             popen = subprocess.Popen
         self.review_supervisor = ReviewSupervisor(self.state_dir, popen, clock=self.clock)
         env = {key: value for key, value in self.env.items() if not str(key).startswith("HERDR_")}
-        self.review_supervisor.start(review.command, request, cwd=view.get("workspace"), env=env, timeout=review.timeout_seconds)
+        cwd = view.get("workspace") if self.review_source == "workspace" else None
+        self.review_supervisor.start(review.command, request, cwd=cwd, env=env, timeout=review.timeout_seconds)
         self.review_scope_name = request["scope"]
         self.review_head = (request.get("revision") or {}).get("head") or (request.get("revision") or {}).get("commit")
+        self.review_origin = self._review_origin()
+        self.review_findings = []
         self.status = "review running"
         self.pending = None
 
@@ -977,6 +1019,13 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
         self.target = dict(row)
         self.pr_choice = None
         self.diff_view = None
+        self._parked_diff = {"workspace": None, "pr": None}
+        self.revision_oid = None
+        self.revision_parent = None
+        self.pr_commit_oid = None
+        self.pr_diff_open = False
+        self.review_findings = []
+        self.review_jumps = []
         self.changes_cursor = 0
         self.changes_pick = None
         self.changes_menu = None
@@ -1441,17 +1490,17 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
             self._terminal_pump()
 
     def _poll_review(self):
-        supervisor = getattr(self, "review_supervisor", None)
+        supervisor = self.review_supervisor
         if supervisor is None:
             return
         outcome = supervisor.tick()
         if not outcome or supervisor.run_dir is None:
             return
+        self.review_supervisor = None
         self.status = outcome
         result_path = supervisor.run_dir / "stdout.json"
         if outcome != "complete" or not result_path.is_file():
             return
-        view = self.diff_view or {}
         request_path = supervisor.run_dir / "request.json"
         try:
             request = json.loads(request_path.read_text())
@@ -1597,6 +1646,50 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
         )
         self.screen = "detail"
         self.pr_selection_key = row["key"]
+
+    def _open_pr_review(self, pr):
+        """The PR's whole diff, or the pinned PR commit's, in the shared diff viewport."""
+        head = (((self._pr_detail(pr) or {}).get("view")) or {}).get("head_oid")
+        if not head:
+            self.status = "PR head unknown: wait for the PR to load"
+            return
+        commit = self.pr_commit_oid
+        if commit:
+            argv = ["gh", "api", "--hostname", pr["host"], "-H", "Accept: application/vnd.github.diff", f"repos/{pr['owner']}/{pr['repo']}/commits/{commit}"]
+        else:
+            argv = ["gh", "pr", "diff", str(pr["number"]), "-R", pr["slug"], "--color", "never"]
+        result = self.transport.run(argv, env=self._gh_env(), timeout=DIFF_TIMEOUT, cwd=str(self.state_dir))
+        if result.timed_out or result.code != 0:
+            self.status = "PR diff unavailable"
+            return
+        text = sanitize(result.stdout or "")
+        if len(text) > DIFF_CAP:
+            text = text[:DIFF_CAP] + "\n[diff truncated]\n"
+        parsed = parse_diff(text)
+        paths = patch_line_paths(text)
+        kept = [(line, path) for line, path in zip(parsed, paths) if not (line.kind == "h" and line.text.startswith(HIDDEN_HEADERS))]
+        lines = [line for line, _ in kept]
+        info = self._ws_info(self.target) if self.target else None
+        ws = (info or {}).get("workspace")
+        same_project = bool(ws and ws.path and (self.target or {}).get("project_key") == pr["project_key"])
+        self.diff_view = {
+            "key": ("pr", tuple(pr["key"]), commit),
+            "pr": tuple(pr["key"]),
+            "entry": FileEntry("pr", "P", f"PR #{pr['number']}" + (f" commit {commit[:7]}" if commit else "")),
+            "lines": lines,
+            "cursor": next((index for index, line in enumerate(lines) if line.kind in "+-"), 0),
+            "mark": None,
+            "top": 0,
+            "xoff": 0,
+            "error": "" if lines else "no line changes to show",
+            "workspace": ws.path if same_project else None,
+            "head": head,
+            "branch": None,
+            "patch": text,
+            "paths": [path for _, path in kept],
+            "revision": commit or "head",
+        }
+        self.pr_diff_open = True
 
     def _open_diff(self, row, path=None):
         """The PR's diff in the pane; with `path`, only that file's part of it."""

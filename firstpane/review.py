@@ -102,6 +102,35 @@ def build_request(*, run_id, created_at, skills, repository, scope, revision, fi
     }
 
 
+def patch_files(patch_text):
+    """The request's file rows, read from the patch's own diff headers."""
+    files = []
+    for line in parse_diff(patch_text):
+        if line.kind != "h":
+            continue
+        text = line.text
+        if text.startswith("diff --git ") and " b/" in text:
+            path = text.split(" b/", 1)[1]
+            files.append({"path": path, "old_path": None, "status": "modified", "old_blob": None, "new_blob": None})
+        elif files and text.startswith("new file mode"):
+            files[-1]["status"] = "added"
+        elif files and text.startswith("deleted file mode"):
+            files[-1]["status"] = "deleted"
+        elif files and text.startswith("rename from "):
+            files[-1].update(status="renamed", old_path=text[len("rename from "):])
+    return files
+
+
+def patch_line_paths(patch_text):
+    """The file path of each parse_diff row of `patch_text`, in order."""
+    paths, current = [], None
+    for line in parse_diff(patch_text):
+        if line.kind == "h" and line.text.startswith("diff --git ") and " b/" in line.text:
+            current = line.text.split(" b/", 1)[1]
+        paths.append(current)
+    return paths
+
+
 def _spans(patch_text):
     """{path: {side: [(start, end)]}} from hunk headers. A range must sit inside one of them."""
     spans = {}

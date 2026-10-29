@@ -5,9 +5,11 @@ focuses, attaches to, or reuses the agent's terminal. Closing it requires an exp
 """
 
 import base64
+import binascii
 import json
 import os
 import signal
+import subprocess
 from pathlib import Path
 
 PASTE_START = b"\x1b[200~"
@@ -31,9 +33,9 @@ class TerminalControl:
             argv.append("--takeover")
         self.child = self.popen(
             argv,
-            stdin=__import__("subprocess").PIPE,
-            stdout=__import__("subprocess").PIPE,
-            stderr=__import__("subprocess").PIPE,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
             env=env,
             start_new_session=True,
             shell=False,
@@ -43,10 +45,13 @@ class TerminalControl:
         return argv
 
     def _send(self, payload):
-        if self.stdin is None:
+        if self.stdin is None or self.child is None:
             return
-        self.stdin.write((json.dumps(payload) + "\n").encode())
-        self.stdin.flush()
+        try:
+            self.stdin.write((json.dumps(payload) + "\n").encode())
+            self.stdin.flush()
+        except (OSError, ValueError):
+            self.stdin = None
 
     def resize(self, cols, rows):
         self._send({"type": "terminal.resize", "cols": cols, "rows": rows})
@@ -97,7 +102,10 @@ class TerminalControl:
             return
         self._send({"type": "terminal.release"})
         if self.stdin is not None:
-            self.stdin.close()
+            try:
+                self.stdin.close()
+            except OSError:
+                pass
         try:
             self.child.wait(1)
         except Exception:
@@ -185,6 +193,9 @@ class TerminalMixin:
         self.terminal_status = ""
         self.terminal_keyboard = False
         self.terminal_grid = TermGrid()
+        self.terminal_control = None
+        self._terminal_attached = None
+        self._terminal_size = None
         self._terminal_book = None
         self._terminal_calls = []
 
@@ -206,22 +217,30 @@ class TerminalMixin:
     def _terminal_body(self, plain, budget):
         directory, reason = self._terminal_directory()
         if reason:
+            self._terminal_reset()
             self.terminal_status = f"Terminal unavailable: {reason}"
             return [self.terminal_status], [None]
         record = self._terminal_book_for().find(directory)
         agent_terminal = (self.target or {}).get("terminal_id")
         if agent_terminal_refused(record, agent_terminal):
+            self._terminal_reset()
             self.terminal_status = "Firstpane will not attach to an agent's terminal"
             return [self.terminal_status], [None]
         if record and record.get("state") == "pending":
+            self._terminal_reset()
             self.terminal_status = f"Creating the terminal may have succeeded; a Herdr tab '{record.get('label')}' may exist. n creates a new one."
             return [self.terminal_status], [None]
         if record is None and should_create(True, "ok", record):
+            self._terminal_reset()
             self._terminal_create(directory)
             record = self._terminal_book_for().find(directory)
         if record and record.get("state") == "ready" and record.get("terminal_id"):
+            if not self.terminal_status.startswith("Terminal output"):
+                self.terminal_status = ""
             self._terminal_attach(record)
             self._terminal_sync_size()
+        else:
+            self._terminal_reset()
         lines = self.terminal_grid.rows(self.terminal_keyboard)[:budget]
         if self.terminal_status:
             lines = [self.terminal_status] + lines
@@ -277,15 +296,14 @@ class TerminalMixin:
 
     def _terminal_attach(self, record):
         if getattr(self, "terminal_control", None) is not None:
-            return
-        import os
-        popen = getattr(self, "terminal_popen", None)
-        if popen is None:
-            import subprocess
-            popen = subprocess.Popen
+            if self._terminal_attached == record["terminal_id"]:
+                return
+            self._terminal_reset()
+        popen = getattr(self, "terminal_popen", None) or subprocess.Popen
         herdr = os.environ.get("HERDR_BIN_PATH") or "herdr"
         self.terminal_control = TerminalControl(popen)
         self.terminal_control.start(herdr, record["terminal_id"], max(2, self.cols), max(2, self.rows - 2), self.env)
+        self._terminal_attached = record["terminal_id"]
 
     def _terminal_sync_size(self):
         control = getattr(self, "terminal_control", None)
@@ -306,19 +324,34 @@ class TerminalMixin:
         for line in raw.splitlines():
             try:
                 payload = json.loads(line)
-            except json.JSONDecodeError:
+                if payload.get("type") != "terminal.frame":
+                    continue
+                data = base64.b64decode(payload.get("bytes") or "", validate=True)
+                width = int(payload.get("width") or self.cols)
+                height = int(payload.get("height") or max(2, self.rows - 2))
+            except (ValueError, TypeError, AttributeError, binascii.Error):
+                self.terminal_status = "Terminal output not understood; showing the last good frame"
                 continue
-            if payload.get("type") != "terminal.frame":
-                continue
-            data = base64.b64decode(payload.get("bytes") or "")
-            self.terminal_grid.apply(data, bool(payload.get("full")), int(payload.get("width") or self.cols), int(payload.get("height") or max(2, self.rows - 2)))
+            if self.terminal_grid.apply(data, bool(payload.get("full")), width, height):
+                self.terminal_status = "Terminal output not understood; showing the last good frame"
+            elif self.terminal_status.startswith("Terminal output"):
+                self.terminal_status = ""
 
     def _terminal_release(self):
         control = getattr(self, "terminal_control", None)
         if control is not None:
             control.release()
             self.terminal_control = None
+        self._terminal_attached = None
         self.terminal_keyboard = False
+
+    def _terminal_reset(self):
+        """Detach and forget the last frame, so the next shell never shows this one's screen."""
+        if getattr(self, "terminal_control", None) is None and not self.terminal_grid.cells:
+            return
+        self._terminal_release()
+        self.terminal_grid = TermGrid()
+        self._terminal_size = None
 
     def _terminal_raw(self, data):
         control = getattr(self, "terminal_control", None)
@@ -360,6 +393,7 @@ class TerminalMixin:
         self.screen = "tree"
         self.pending = None
         record = self._terminal_book_for().find(directory) if directory else None
+        self._terminal_reset()
         if not record or not record.get("pane_id"):
             self.terminal_status = "terminal already gone"
             if directory:
