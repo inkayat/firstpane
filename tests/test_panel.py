@@ -984,6 +984,25 @@ class InlineMessageTests(PanelFixture):
         self.assertIn("note outcome: queued", plain(app.render()))
         self.assertEqual(self.main.received, [])
 
+    def test_a_saved_unannounced_message_is_announced_from_the_pull_request_source_without_a_pull_request(self):
+        # Break: the PR source swallows `a` while no pull request is associated, so a saved
+        # message waits for a PR that may never exist.
+        store = DraftStore(self.state / "drafts")
+        old = store.load("fm:alpha-task:term_a|diff:old", {"label": "alpha-task"})
+        old.update(body="wake up", outcome="saved-unannounced", note_id="n-msg")
+        self.assertTrue(store.save(old))
+        self.transport.inbox_results = [CmdResult(0, note_json("created", note_id="n-msg"), "")]
+        app = self.app()
+        self.open_changes(app)
+        if app.review_source != "pr":
+            app.handle_key("\\")
+        self.assertEqual(app.review_source, "pr")
+        self.assertIsNone(app._current_pr())
+        app.handle_key("a")
+        self.assertEqual([call["argv"][1] for call in self.transport.inbox], ["announce"])
+        self.assertIn("n-msg", self.transport.inbox[0]["argv"])
+        self.assertIn("note outcome: queued", plain(app.render()))
+
     def test_unconfigured_firstmate_keeps_the_draft_and_sends_nothing(self):
         # Break: without a FirstMate home the inline editor sends somewhere or discards the text.
         self.config.firstmate_home = None

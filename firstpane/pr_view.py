@@ -454,7 +454,6 @@ def _spans(lead, labels):
 class PullRequestsMixin:
     def _init_prs(self):
         self.pr_choice = None
-        self.pr_picker = False
         self.pr_menu = None
         self.pr_menu_kind = "actions"
         self.pr_commit_oid = None
@@ -476,7 +475,7 @@ class PullRequestsMixin:
     # ---- which PR --------------------------------------------------------------------
     def _all_prs(self):
         """Open PRs of the selected agent's project only. Other projects are not an inventory."""
-        project = self._agent_project()
+        project = self._pr_project()
         if project is None or self._pr_state(project) != "prs":
             return []
         return list(project["pr_rows"])
@@ -484,6 +483,11 @@ class PullRequestsMixin:
     def _agent_project(self):
         key = (self.target or {}).get("project_key")
         return self._project(key) if key else None
+
+    def _pr_project(self):
+        """The selected agent's project when its pull requests may be read. A private task clone is listed on Agents only."""
+        project = self._agent_project()
+        return None if project is None or project.get("agents_only") else project
 
     def _branch_record(self):
         """(known|detached|unknown, branch name). A missing read is unknown, not 'no branch'."""
@@ -520,6 +524,8 @@ class PullRequestsMixin:
         project = self._agent_project()
         if project is None:
             return "unknown", None, "agent project is unknown"
+        if project.get("agents_only"):
+            return "unknown", None, "pull requests are not read for a private task clone"
         state = self._pr_state(project)
         if state == "loading":
             return "unknown", None, "still reading pull requests"
@@ -590,13 +596,8 @@ class PullRequestsMixin:
                 self.diff_view = None
             self._pr_top = 0
         self.pr_choice = tuple(row["key"])
-        self.pr_picker = False
         self.pr_menu = None
         self._fetch_pr_detail(row, force=False)
-
-    def _open_picker(self):
-        """There is no project-wide pull request list. Association chooses the page."""
-        self.pr_picker = False
 
     # ---- reads -----------------------------------------------------------------------
     def _pr_detail(self, pr):
@@ -753,6 +754,9 @@ class PullRequestsMixin:
             return True
         if key == "p":
             return True
+        if key == "a":
+            self._announce()
+            return True
         if pr is None:
             return True
         detail = self._pr_detail(pr)
@@ -785,8 +789,6 @@ class PullRequestsMixin:
                 self._arm_resolve(pr, thread)
             else:
                 self.status = "select an open conversation first"
-        elif key == "a":
-            self._announce()
         elif key == "L" and self.pr_section == "checks":
             self._show_check_log(pr, detail)
         elif key == "C":
@@ -1121,14 +1123,6 @@ class PullRequestsMixin:
         avail = max(1, budget - len(rows))
         rows.extend(self._section_window(pr, detail, plain, avail))
         return [text for text, _ in rows], [hit for _, hit in rows]
-
-    def _pr_list_body(self, plain, budget, lines, hits):
-        summary = self._pr_summary()
-        if summary:
-            lines.append(" " + summary)
-            hits.append(None)
-            budget -= 1
-        return self._tree_lines(self._rows(), max(1, budget), lines, hits, plain)
 
     def _selector_row(self, pr, plain):
         """`[ #n · title ]`, then `[ GitHub ↗ ]  [ PR actions ▾ ]`. Not a list of other pull requests."""

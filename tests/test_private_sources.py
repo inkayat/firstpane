@@ -186,6 +186,32 @@ class PrivateSourceTests(unittest.TestCase):
         app.handle_key("1")
         self.assertIn(humanize("beta-task"), strip_sgr(app.render()))
 
+    def test_a_selected_private_clone_agent_never_has_its_remote_queried_on_the_pull_request_source(self):
+        # Break: selecting an agent on a task-private clone lets the PR source run gh against
+        # the clone's remote and list that repository's pull requests.
+        source, wt = self.private(self.home, "beta-pool", "fm/beta-task", name="alpha")
+        self.git(source, "remote", "add", "origin", "https://github.com/acme/private-clone.git")
+        self.report("beta-task", source, wt, number=2)
+        app, _ = self.listed()
+        app.handle_key("1")
+        for _ in range(4):
+            if humanize("beta-task") in selected_line(app.render()):
+                break
+            app.handle_key("j")
+        app.handle_key("enter")
+        self.assertEqual(app.target["project_key"], str(source))
+        self.transport.calls = []
+        app.handle_key("2")
+        if app.review_source != "pr":
+            app.handle_key("\\")
+        self.assertEqual(app.review_source, "pr")
+        app.refresh(manual=True)
+        text = strip_sgr(app.render())
+        self.assertFalse([call for call in self.transport.calls if call["argv"][:1] == ["gh"]])
+        self.assertIsNone(app._current_pr())
+        self.assertIn("pull requests are not read for a private task clone", text)
+        self.assertNotIn("no pull request for this branch", text)
+
     def pull_requests(self):
         """(app, (Pull Requests tab text, the project paths it queried with git))."""
         self.transport.calls = []

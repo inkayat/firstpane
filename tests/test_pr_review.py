@@ -428,7 +428,6 @@ class ReviewPageTests(ReviewFixture):
         app = self.app()
         target = dict(app.target)
         self.click(app, "[ #7", "#7")
-        self.assertFalse(app.pr_picker)
         text = self.text(app)
         self.assertNotIn("#12", text)
         self.assertNotIn("Beta cleanup", text)

@@ -896,7 +896,7 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
         return bool(common) and _canonical(common) == _canonical(meta["project"])
 
     def _pr_projects(self):
-        """The Pull Requests inventory: every project except a private clone shown on Agents only."""
+        """Every project except a private clone shown on Agents only."""
         return [project for project in self.projects if not project.get("agents_only")]
 
     def _generic_in_scope(self, agent, pane, workspaces):
@@ -962,23 +962,6 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
         if choice is not None and not choice.slug:
             return "skipped"
         return "prs" if project["pr_rows"] else "empty"
-
-    def _pr_summary(self):
-        """What the list cannot show: projects still loading, failing, or never queried."""
-        states = [self._pr_state(project) for project in self._pr_projects()]
-        loading, failed, skipped = states.count("loading"), states.count("error"), states.count("skipped")
-        parts = []
-        if loading:
-            parts.append(f"loading \u00b7 {len(states) - loading} of {len(states)} projects checked")
-        elif not states:
-            parts.append("no projects")
-        elif not failed and "prs" not in states:
-            parts.append("no open pull requests")
-        if failed:
-            parts.append(f"{failed} failed")
-        if skipped:
-            parts.append(f"{skipped} not queried (no allowed GitHub remote)")
-        return " \u00b7 ".join(parts)
 
     def _mark(self, open_):
         return "\u25be" if open_ else "\u25b8"
@@ -1501,7 +1484,7 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
         """Fetch the selected agent's repository only, while the Pull Request source is showing."""
         if not self._on("prs"):
             return
-        project = self._agent_project()
+        project = self._pr_project()
         if project is not None:
             self._fetch_prs(project, force=force)
         current = self._current_pr()

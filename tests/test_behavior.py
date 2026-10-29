@@ -1025,7 +1025,6 @@ class PullRequestTests(AppFixture):
         self.assertEqual([call["argv"][call["argv"].index("view") + 1] for call in views], ["3"])
         self.assertIn("-R", views[0]["argv"])
         self.assertIn("github.com/acme/widgets", views[0]["argv"])
-        self.assertFalse(app.pr_picker)
         app.handle_key(".")
         self.select_menu(app, "Description")
         app.handle_key("enter")
