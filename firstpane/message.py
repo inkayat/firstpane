@@ -216,7 +216,9 @@ def build_message(context, user_text, attachments):
         parts.append("\n" + text + "\n")
     warnings = []
     size = sum(len(part.encode()) for part in parts)
-    for index, attachment in enumerate(attachments or [], 1):
+    # board-request is internal reply binding; its identity is already in the header
+    attachments = [item for item in attachments or [] if item.get("kind") != "board-request"]
+    for index, attachment in enumerate(attachments, 1):
         block = attachment_text(index, attachment)
         warnings.extend(scan_secrets(index, block))
         if size + len(block.encode()) + 1 > BODY_BYTES:

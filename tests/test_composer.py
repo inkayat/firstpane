@@ -160,6 +160,16 @@ class MessageTests(unittest.TestCase):
         body, _ = build_message(CONTEXT, "", [legacy])
         self.assertIn("[1] diff src/app.py  unstaged  new lines 12-12  HEAD 0123456789ab  new blob 9f3e2a1b7c0d\n", body)
 
+    def test_the_internal_board_request_binding_is_not_sent_as_an_attachment(self):
+        # Break: a Board reply draft carries a board-request binding next to its board task;
+        # rendering it appends a stray "[2] unsupported attachment" block to the paste.
+        board_task = {"kind": "board", "id": "fp-ask-0001", "project": "alter", "state": "waiting", "title": "Layout?"}
+        request = {"kind": "board-request", "id": "fp-ask-0001"}
+        body, _ = build_message(CONTEXT, "ok", [board_task, request])
+        self.assertIn("[1] board task fp-ask-0001", body)
+        self.assertNotIn("unsupported attachment", body)
+        self.assertNotIn("[2]", body)
+
     def test_long_attachment_is_truncated_visibly(self):
         # Break: a huge selection is sent whole, or cut without saying so.
         lines = [f"+line {n}" for n in range(250)]
