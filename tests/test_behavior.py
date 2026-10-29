@@ -970,7 +970,7 @@ class PullRequestTests(AppFixture):
 
     def expand_prs(self, app):
         app.refresh(manual=True)
-        app.handle_key("4")
+        (app.handle_key("2"), None if app.review_source == "pr" else app.handle_key("\\"))
 
     def test_gh_is_not_called_until_the_tab_opens_and_listing_targets_origin(self):
         # Break: listing uses the upstream remote, gh's cwd default, or polls before the tab is opened.
@@ -1356,7 +1356,7 @@ class PullRequestTests(AppFixture):
         app.handle_key("n")
         app.handle_key("y")
         self.assertEqual(self.transport.browser, [])
-        self.assertIn("Pull Requests", strip_sgr(app.render()))
+        self.assertIn("Review", strip_sgr(app.render()))
 
     def test_comment_identity_is_the_prs_host_account_and_a_failed_lookup_is_retried(self):
         # Break: the confirm names the github.com account for a GHE PR, or a failure sticks as @unknown.
@@ -1475,7 +1475,7 @@ class InventoryTests(AppFixture):
         self.assertNotIn("beta", visible)
         self.assertIn("no agents", visible)
         self.assertEqual(self.gh_calls(), [])
-        app.handle_key("4")
+        (app.handle_key("2"), None if app.review_source == "pr" else app.handle_key("\\"))
         app.handle_key("p")
         visible = strip_sgr(app.render())
         self.assertIn("\u25be beta", visible)
@@ -1491,7 +1491,7 @@ class InventoryTests(AppFixture):
         self.config.project_allowlist = (str(self.projects / "beta"),)
         app = self.app()
         app.refresh(manual=True)
-        app.handle_key("4")
+        (app.handle_key("2"), None if app.review_source == "pr" else app.handle_key("\\"))
         visible = strip_sgr(app.render())
         self.assertIn("beta", visible)
         self.assertNotIn("alpha", visible)
@@ -1535,7 +1535,7 @@ class InventoryTests(AppFixture):
         with mock.patch.dict(os.environ, {"HOME": str(self.root)}):
             app = self.app()
             app.refresh(manual=True)
-        app.handle_key("4")
+        (app.handle_key("2"), None if app.review_source == "pr" else app.handle_key("\\"))
         app.handle_key("p")
         visible = strip_sgr(app.render())
         self.assertIn("\u25be beta", visible)
@@ -1556,7 +1556,7 @@ class InventoryTests(AppFixture):
         self.transport.handlers[:] = [(lambda argv: True, handle)]
         app = self.app()
         app.refresh(manual=True)
-        app.handle_key("4")
+        (app.handle_key("2"), None if app.review_source == "pr" else app.handle_key("\\"))
         app.handle_key("p")
         app.render()
         prs = [index for index, row in enumerate(app.hit_rows, start=1) if row and row["kind"] == "pr"]

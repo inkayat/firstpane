@@ -164,7 +164,7 @@ class ReviewFixture(AppFixture):
         kwargs.setdefault("wall", lambda: NOW)
         app = super().app(**kwargs)
         app.refresh(manual=True)
-        app.handle_key("4")
+        (app.handle_key("2"), None if app.review_source == "pr" else app.handle_key("\\"))
         return app
 
     def text(self, app):
@@ -324,7 +324,7 @@ class ReviewPageTests(ReviewFixture):
         self.select_line(app, "Alpha task")
         app.handle_key("enter")
         target = dict(app.target)
-        app.handle_key("4")
+        (app.handle_key("2"), None if app.review_source == "pr" else app.handle_key("\\"))
         self.assertIn("[ #9 \u00b7 Agent branch work \u25be ]", self.text(app))
         self.click(app, "[ #9", "#9")
         self.assertTrue(app.pr_picker)
@@ -434,8 +434,8 @@ class AddToFirstMateTests(ReviewFixture):
         self.assertEqual(app.focus, "composer")
         for char in "agent field text":
             app.handle_key(char)
-        self.click(app, "Pull Requests", "Pull Requests")
-        self.assertEqual(app.tab, "prs")
+        self.click(app, "Review", "Review")
+        self.assertEqual((app.tab, app.review_source), ("review", "pr"))
         self.assertNotEqual(app.focus, "composer")
         self.assertNotIn("agent field text", self.text(app))
         app.handle_key("tab")

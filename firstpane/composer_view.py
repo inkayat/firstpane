@@ -18,9 +18,10 @@ from pathlib import Path
 from firstpane.cells import fit, tail, width
 from firstpane.handoff import Handoff
 from firstpane.message import build_message
+from firstpane.review import patch_line_paths
 from firstpane.sanitize import sanitize
 from firstpane.style import ACCENT, FIELD_BG, INK, MUTED, PINK, SEND_BG, YELLOW, paint, rgb_bg, rgb_fg
-from firstpane.workspace import FileEntry, parse_diff, read_diff
+from firstpane.workspace import FileEntry, parse_diff, read_commit_diff, read_diff
 
 ATTEMPTED = ("unknown", "saved-unannounced")
 EDITOR_ROWS = 3
@@ -54,6 +55,8 @@ def anchor_key(record):
     """Identity of a selection: the same lines (or page selection) reopen the same draft."""
     if record.get("kind") == "diff":
         basis = ["diff", record.get("workspace"), record.get("group"), record.get("path"), record.get("rows")]
+        if record.get("group") == "commit":
+            basis.append(record.get("revision"))
     elif record.get("kind") == "pr-thread":
         basis = ["pr-thread", record.get("slug"), record.get("number"), record.get("thread_id")]
     else:
@@ -355,6 +358,10 @@ class ComposerMixin:
     def _lines_changed(self, item):
         """True when the selected rows are no longer in the file's current diff."""
         entry = FileEntry(item.get("group"), item.get("code") or "M", item.get("path"), item.get("orig"))
+        if item.get("group") == "commit":
+            text, error = read_commit_diff(self.transport.run, item.get("workspace"), item.get("revision"), self.env)
+            mine = [line for line, path in zip(parse_diff(text), patch_line_paths(text)) if path == item.get("path")]
+            return bool(error) or locate(item, mine) is None
         text, error = read_diff(self.transport.run, item.get("workspace"), entry, self.env)
         return bool(error) or locate(item, parse_diff(text)) is None
 
@@ -466,14 +473,14 @@ class ComposerMixin:
 
     def _context_footer_active(self):
         """Changes and Pull Requests pin their context composer when the pane can hold it."""
-        return self.screen == "tree" and self.tab in ("changes", "prs") and self.rows >= 16
+        return self.screen == "tree" and (self._on("changes") or self._on("prs")) and self.rows >= 16
 
     def _open_context_draft(self):
         draft = self.draft
         kind = (draft.get("anchor") or {}).get("kind") if draft else None
-        if self.tab == "changes" and kind == "diff":
+        if self._on("changes") and kind == "diff":
             return draft
-        if self.tab == "prs" and kind == "pr-thread":
+        if self._on("prs") and kind == "pr-thread":
             return draft
         return None
 
@@ -492,14 +499,16 @@ class ComposerMixin:
         else:
             count = ""
         label = " " + paint(title, "1;" + rgb_fg(ACCENT), plain)
-        right = paint(count + " ", rgb_fg(MUTED), plain) if count else ""
+        right = paint("To: FirstMate ", rgb_fg(MUTED), plain)
+        if count:
+            right = paint(count + "  ", rgb_fg(MUTED), plain) + right
         rows = [(self._footer_spread(label, right), {"kind": "context-footer", "part": "label"})]
         if draft:
             chip = self._inline_label(draft) + " \u00d7"
             shown = chip if width(chip) <= self.cols - 2 else tail(chip, self.cols - 2)
             text = " " + paint(shown, rgb_fg(INK) + ";" + rgb_bg(FIELD_BG), plain)
             rows.append((text, {"kind": "context-footer", "part": "chip", "dismiss": 1 + width(shown)}))
-        placeholder = "Select lines to write to FirstMate" if self.tab == "changes" else "Add a conversation to write to FirstMate"
+        placeholder = "Select lines to write to FirstMate" if self._on("changes") else "Add a conversation to write to FirstMate"
         rows.append(self._footer_field(draft, placeholder, plain))
         hint = "Enter previews for FirstMate's message box; it is not sent" if draft else "Enter on a selection adds it here"
         if draft and draft.get("outcome"):
@@ -556,7 +565,7 @@ class ComposerMixin:
         self.status = self._footer_need()
 
     def _footer_need(self):
-        if self.tab == "changes":
+        if self._on("changes"):
             return "select diff lines to write about"
         return "add a conversation to write about"
 

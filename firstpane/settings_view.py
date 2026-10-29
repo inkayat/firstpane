@@ -7,9 +7,10 @@ the next time the Browser tab opens it.
 
 Tabs shows or hides each tab in the tab row. Hiding only removes the tab from navigation; its data
 and any browser it opened stay as they are. The number keys count the shown tabs 1, 2, 3... in
-their fixed order. Key 6 also opens a hidden Settings, so a hidden tab
-can always be shown again.
+their fixed order. Settings is a header control, always reachable, not a tab.
 """
+
+LEGACY_SOURCES = {"changes": "workspace", "prs": "pr"}
 
 from firstpane.cells import fit
 from firstpane.pr_view import word_wrap
@@ -24,6 +25,31 @@ PLACEMENT_NOTES = {
     "embedded": "the page drawn in this pane's Browser tab",
 }
 LABEL_WIDTH = max(len(label) for label in PLACEMENT_LABELS.values())
+
+
+def migrate_ui_state(data, tabs):
+    """(tab, review_source, hidden) from saved ui-state.
+
+    Old Changes and Pull Requests tabs become Review sources. Review is hidden only when both
+    were hidden. A saved Settings tab, and Settings in hidden_tabs, are dropped.
+    """
+    data = data if isinstance(data, dict) else {}
+    saved = data.get("tab")
+    source = data.get("review_source") if data.get("review_source") in ("workspace", "pr") else "workspace"
+    if saved in LEGACY_SOURCES:
+        source = LEGACY_SOURCES[saved]
+        saved = "review"
+    elif saved == "settings":
+        saved = None
+    raw = data.get("hidden_tabs")
+    raw = raw if isinstance(raw, list) else []
+    hidden = {name for name in raw if name in tabs}
+    if "changes" in raw and "prs" in raw:
+        hidden.add("review")
+    visible = [name for name in tabs if name not in hidden]
+    if saved not in tabs or saved in hidden:
+        saved = visible[0] if visible else tabs[0]
+    return saved, source, hidden
 
 
 class SettingsMixin:
@@ -46,12 +72,11 @@ class SettingsMixin:
         return [name for name in TABS if name not in self.hidden_tabs]
 
     def _tab_for_number(self, key):
-        """The tab a number key opens: the shown tabs counted from 1. Key 6 is the one extra way
-        to a hidden Settings (it is never a shown tab's number then: at most five tabs are shown)."""
+        """The tab a number key opens: the shown tabs counted from 1. Settings is not a number."""
         visible = self._visible_tabs()
-        if int(key) <= len(visible):
+        if key.isdigit() and 1 <= int(key) <= len(visible):
             return visible[int(key) - 1]
-        return "settings" if key == "6" and "settings" in self.hidden_tabs else None
+        return None
 
     def _settings_shown(self):
         """The cursor starts on the current choice."""
@@ -72,8 +97,6 @@ class SettingsMixin:
         self.hidden_tabs ^= {name}
         hidden = name in self.hidden_tabs
         self.status = f"{TAB_LABELS[name]} tab {'hidden' if hidden else 'shown'}"
-        if hidden and name == "settings":
-            self.status += "; key 6 still opens it"
         self._save_ui()
 
     # ---- body --------------------------------------------------------------------------
@@ -104,7 +127,7 @@ class SettingsMixin:
         lines.append(("", None))
         lines.append((" " + paint("Tabs", rgb_fg(BRIGHT, bold=True), plain), None))
         lines += prose("Show or hide tabs in the tab row. The number keys open the shown tabs, counted from 1; "
-                       "a hidden tab keeps its data. If Settings is hidden, key 6 still opens it")
+                       "a hidden tab keeps its data. Settings stays in the header")
         lines.append(("", None))
         for index, name in enumerate(TABS, start=len(PLACEMENTS)):
             hit = {"kind": "setting-tab", "value": name}

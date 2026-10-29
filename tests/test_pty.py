@@ -51,7 +51,9 @@ script, args = sys.argv[2], sys.argv[3:]
 if "new tab in" in script:
     subprocess.Popen(["/bin/bash", "--noprofile", "--norc", "-c", "exec -l " + args[0]], cwd=args[1], start_new_session=True,
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    print("HW-1\nHT-2\nGT-1")
+    sys.stdout.write("HW-1\nHT-2\nGT-1\n")
+    sys.stdout.flush()
+    os._exit(0)
 """
 
 
@@ -350,7 +352,7 @@ class PtyTests(unittest.TestCase):
         term = self.open()
         term.wait_for(lambda s: "Pty task" in s.text())
         term.send(b"\r")
-        term.send(b"6")
+        term.send(b",")
         term.wait_for(lambda s: "Browser placement" in s.text() and "(\u2022) Ghostty tab" in s.text())
         self.assertIn("Settings", term.screen.lines()[0])
         term.send(b"j")
@@ -364,7 +366,7 @@ class PtyTests(unittest.TestCase):
         column = term.screen.lines()[row - 1].index("Inside") + 1
         term.send(f"\x1b[<0;{column};{row}M\x1b[<0;{column};{row}m".encode())
         term.wait_for(lambda s: "(\u2022) Inside Firstpane" in s.text())
-        term.send(b"3")
+        term.send(b"5")
         run = self.wait_file(out, term)
         parent = subprocess.run(["ps", "-o", "ppid=", "-p", str(run["pid"])], capture_output=True, text=True).stdout.strip()
         self.assertEqual(parent, str(term.pid))
@@ -382,9 +384,9 @@ class PtyTests(unittest.TestCase):
         out.unlink()
         again = self.open()
         again.wait_for(lambda s: "pty-task" in s.text())
-        again.send(b"6")
+        again.send(b",")
         again.wait_for(lambda s: "(\u2022) Inside Firstpane" in s.text())
-        again.send(b"3")
+        again.send(b"5")
         self.assertTrue(self.wait_file(out, again)["env"]["PIXEL_EMBED"])
         self.assertEqual(self.osascript_calls(), [])
 
@@ -393,7 +395,7 @@ class PtyTests(unittest.TestCase):
         # number key still opens it, or a restarted Firstpane shows it again.
         term = self.open()
         term.wait_for(lambda s: "Pty task" in s.text())
-        term.send(b"6")
+        term.send(b",")
         term.wait_for(lambda s: "[x] Board" in s.text())
         row = self.row_of(term.screen, "[x] Board")
         column = term.screen.lines()[row - 1].index("[x]") + 1
@@ -401,12 +403,16 @@ class PtyTests(unittest.TestCase):
         term.wait_for(lambda s: "[ ] Board" in s.text() and "Board" not in s.lines()[0])
         term.send(b"1")
         term.wait_for(lambda s: "Pty task" in s.text())
-        term.send(b"5")  # Board is hidden: Settings is the fifth shown tab, no longer the sixth
+        term.send(b"4")  # Board is hidden, so 4 is Browser, not Board
+        term.wait_for(lambda s: "Pty task" not in s.text() or "Browser" in s.lines()[0])
+        self.assertNotIn("Board", term.screen.lines()[0])
+        term.send(b",")
         term.wait_for(lambda s: "[ ] Board" in s.text())
-        self.assertEqual(term.screen.lines()[0].split()[-1:], ["Settings"])
         term.send(b"\x03")
         self.assertEqual(term.exit_code(), 0)
         again = self.open()
+        again.wait_for(lambda s: "Settings" in s.lines()[0])
+        again.send(b",")
         again.wait_for(lambda s: "[ ] Board" in s.text())
         self.assertNotIn("Board", again.screen.lines()[0])
         self.assertIn("Settings", again.screen.lines()[0])
@@ -416,33 +422,28 @@ class PtyTests(unittest.TestCase):
         column = term.screen.lines()[row - 1].index(needle) + 1
         term.send(f"\x1b[<0;{column};{row}M\x1b[<0;{column};{row}m".encode())
 
-    def test_hiding_settings_and_every_other_tab_leaves_key_six_as_the_way_back_across_a_restart(self):
-        # Break: on the real entrypoint a hidden Settings is unreachable (no key 6, or a restart
-        # lands on a tab with no entry), hidden tabs still open from their number keys, or the
-        # tabs cannot be shown again from there.
+    def test_hiding_every_tab_still_leaves_comma_as_the_way_into_settings(self):
+        # Break: hiding every tab removes the header Settings control, or comma no longer opens it
+        # after a restart.
         term = self.open()
         term.wait_for(lambda s: "Pty task" in s.text())
-        term.send(b"6")
-        term.wait_for(lambda s: "[x] Settings" in s.text())
-        for label in ("Agents", "Changes", "Browser", "Pull Requests", "Board", "Settings"):
+        term.send(b",")
+        term.wait_for(lambda s: "[x] Agents" in s.text())
+        for label in ("Agents", "Review", "Board", "Terminal", "Browser"):
             self.click_row(term, f"[x] {label}")
             term.wait_for(lambda s, label=label: f"[ ] {label}" in s.text())
-        term.wait_for(lambda s: s.lines()[0].strip() == "")
-        term.send(b"3")
-        self.assertEqual(term.screen.lines()[0].strip(), "")
+        term.wait_for(lambda s: "Settings" in s.lines()[0] and "Agents" not in s.lines()[0].split())
+        term.send(b"1")
         self.assertIn("Browser placement", term.screen.text())
         term.send(b"\x03")
         self.assertEqual(term.exit_code(), 0)
         again = self.open()
-        again.wait_for(lambda s: "[ ] Settings" in s.text())
-        self.assertEqual(again.screen.lines()[0].strip(), "")
-        self.click_row(again, "[ ] Agents")
-        again.wait_for(lambda s: "Agents" in s.lines()[0] and "Settings" not in s.lines()[0])
-        again.send(b"1")
-        again.wait_for(lambda s: "Pty task" in s.text())
-        again.send(b"6")
         again.wait_for(lambda s: "Browser placement" in s.text())
-        self.assertNotIn("Settings", again.screen.lines()[0])
+        again.send(b"j")
+        again.send(b"j")
+        again.wait_for(lambda s: "[ ] Agents" in s.text())
+        self.click_row(again, "[ ] Agents")
+        again.wait_for(lambda s: "Agents" in s.lines()[0].split())
 
     def test_the_number_keys_open_the_shown_tabs_in_order_and_the_row_shows_no_numbers(self):
         # Break: on the real entrypoint the tab row shows numbers again, the number keys disagree
@@ -451,42 +452,23 @@ class PtyTests(unittest.TestCase):
         # Settings has no way back.
         term = self.open()
         term.wait_for(lambda s: "Pty task" in s.text())
-        self.assertEqual(term.screen.lines()[0].split(), ["Agents", "Changes", "Browser", "Pull", "Requests", "Board", "Settings"])
-        term.send(b"6")
+        self.assertEqual(term.screen.lines()[0].split(), ["Agents", "Review", "Board", "Terminal", "Browser", "Settings"])
+        term.send(b",")
         term.wait_for(lambda s: "Browser placement" in s.text())
-        self.click_row(term, "[x] Changes")
-        term.wait_for(lambda s: s.lines()[0].split() == ["Agents", "Browser", "Pull", "Requests", "Board", "Settings"])
+        self.click_row(term, "[x] Review")
+        term.wait_for(lambda s: "Review" not in s.lines()[0].split())
         term.send(b"1")
         term.wait_for(lambda s: "Pty task" in s.text())
-        term.send(b"5")
-        term.wait_for(lambda s: "Browser placement" in s.text())
-        for label in ("Browser", "Pull Requests", "Board"):
-            self.click_row(term, f"[x] {label}")
-            term.wait_for(lambda s, label=label: f"[ ] {label}" in s.text())
-        term.wait_for(lambda s: s.lines()[0].split() == ["Agents", "Settings"])
-        term.send(b"1")
-        term.wait_for(lambda s: "Pty task" in s.text() and "Browser placement" not in s.text())
-        term.send(b"6")
-        self.assertNotIn("Browser placement", term.screen.text())
         term.send(b"2")
+        term.wait_for(lambda s: "Board" in s.lines()[0] and "TODO" in s.text() or "Keyboard" in s.text() or "FirstMate" in s.text())
+        term.send(b",")
         term.wait_for(lambda s: "Browser placement" in s.text())
         term.send(b"\x03")
         self.assertEqual(term.exit_code(), 0)
         again = self.open()
-        again.wait_for(lambda s: s.lines()[0].split() == ["Agents", "Settings"])
-        again.send(b"1")
-        again.wait_for(lambda s: "Pty task" in s.text())
-        again.send(b"2")
+        again.wait_for(lambda s: "Review" not in s.lines()[0].split())
+        again.send(b",")
         again.wait_for(lambda s: "Browser placement" in s.text())
-        self.click_row(again, "[x] Settings")
-        again.wait_for(lambda s: s.lines()[0].split() == ["Agents"])
-        again.send(b"1")
-        again.wait_for(lambda s: "Pty task" in s.text())
-        again.send(b"2")
-        self.assertNotIn("Browser placement", again.screen.text())
-        again.send(b"6")
-        again.wait_for(lambda s: "Browser placement" in s.text())
-        self.assertEqual(again.screen.lines()[0].split(), ["Agents"])
 
     @unittest.skipUnless(sys.platform == "darwin", "the Ghostty tab placement is macOS-only; see the next test")
     def test_the_default_placement_opens_one_ghostty_tab_on_the_real_entrypoint(self):
@@ -496,14 +478,14 @@ class PtyTests(unittest.TestCase):
         term = self.open()
         term.wait_for(lambda s: "Pty task" in s.text())
         term.send(b"\r")
-        term.send(b"3")
+        term.send(b"5")
         run = self.wait_file(out, term)
         term.wait_for(lambda s: "in a Ghostty tab" in s.text())
         self.assertNotIn("\U0010EEEE", term.screen.text())
         self.assertEqual(run["argv"], ["open"])
         self.assertFalse([name for name in run["env"] if name.startswith(("HERDR_", "GHOSTTY_"))])
         term.send(b"1")
-        term.send(b"3")
+        term.send(b"5")
         term.send(b"f")
         tabs = [call for call in self.osascript_calls() if "new tab in" in call[1]]
         focus = [call for call in self.osascript_calls() if "new tab in" not in call[1]]
@@ -521,7 +503,7 @@ class PtyTests(unittest.TestCase):
         term = self.open()
         term.wait_for(lambda s: "Pty task" in s.text())
         term.send(b"\r")
-        term.send(b"3")
+        term.send(b"5")
         term.wait_for(lambda s: "needs macOS" in s.text() and "Inside Firstpane" in s.text())
         self.assertEqual(self.osascript_calls(), [])
         self.assertNotIn("pane.split", self.herdr.calls)

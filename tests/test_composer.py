@@ -120,6 +120,8 @@ def diff_attachment(lines, total=None):
         "new_end": 12 + len(lines) - 1,
         "head": "0123456789abcdef0123",
         "blob": "9f3e2a1b7c0d9f3e2a1b",
+        "source": "workspace",
+        "revision": "uncommitted",
         "lines": lines,
         "lines_total": total if total is not None else len(lines),
     }
@@ -142,6 +144,7 @@ class MessageTests(unittest.TestCase):
             "Bunu kontrol et\n"
             "\n"
             "[1] diff src/app.py  unstaged  old lines 12-13  new lines 12-13  HEAD 0123456789ab  new blob 9f3e2a1b7c0d\n"
+            "source workspace  revision uncommitted\n"
             "```diff\n"
             "-x = 0\n"
             "+x = 1\n"

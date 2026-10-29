@@ -8,6 +8,8 @@ import time
 from firstpane import gitops
 from firstpane.cells import char_width, fit, spread, tail, width
 from firstpane.composer_view import locate
+from firstpane.diffview import apply_key, push_jump
+from firstpane.review import mark_findings, patch_line_paths, skill_catalog
 from firstpane.sanitize import sanitize
 from firstpane.style import (
     ACCENT,
@@ -30,7 +32,7 @@ from firstpane.style import (
     rgb_fg,
 )
 from firstpane.syntax import ROLE_SGR, tokens
-from firstpane.workspace import Workspace, content_id, parse_diff, read_counts, read_diff, read_status, resolve_workspace
+from firstpane.workspace import FileEntry, Workspace, commit_list_argv, content_id, parse_commit_list, parse_diff, read_commit_diff, read_commit_parent, read_counts, read_diff, read_status, resolve_workspace
 
 WS_CADENCE = 10
 QUIET = ("idle", "done")
@@ -44,7 +46,7 @@ SCOPES = (
 SCOPE_EMPTY = {"workspace": "no unstaged or untracked changes", "staged": "nothing staged"}
 GIT_KEYS = {"s": "stage", "u": "unstage", "C": "commit", "f": "fetch", "p": "pull", "P": "push"}
 GIT_MENU = (("commit", "Commit staged\u2026", "C"), ("fetch", "Fetch", "f"), ("pull", "Pull (fast-forward)", "p"), ("push", "Push", "P"))
-MENU_KEYS = {"tab": "files", "w": "scope", "g": "git", ".": "more"}
+MENU_KEYS = {"tab": "files", "w": "scope", ".": "more"}
 HIDDEN_HEADERS = ("diff --git ", "index ", "--- ", "+++ ")
 DOUBLE_CLICK = 0.5
 SCROLL_STEP = 8
@@ -355,6 +357,8 @@ class ChangesMixin:
         rows.extend(self._earlier_rows(plain))
         changed = {(entry.group, entry.path) for entry in status.entries}
         for draft in drafts:
+            if draft["anchor"].get("group") == "commit":
+                continue
             if (draft["anchor"].get("group"), draft["anchor"].get("path")) not in changed and not self._footer_holds(draft):
                 rows.extend(self._inline_rows(draft, plain, 1, stale=True))
         avail = budget - len(rows)
@@ -382,7 +386,7 @@ class ChangesMixin:
         """Two control rows: the file picker with the file's place in the scope, then the
         scope and Git menus (top row when wide), the file's +/- lines, Stage and ⋯."""
         cols, wide = self.cols, self.cols >= WIDE
-        entry = entries[self.changes_cursor] if entries else None
+        entry = None if self.revision_oid else entries[self.changes_cursor] if entries else None
         scope = _scope(self.changes_scope)
         shade = self._shades()["pill"]
         scope_pill = ("scope", _pill((scope[1] if wide else scope[2]) + " \u25be", plain, shade))
@@ -392,7 +396,7 @@ class ChangesMixin:
         after = "  " + paint(place, rgb_fg(MUTED), plain) + ("  " + paint(f"\u270e{waiting}", rgb_fg(ACCENT), plain) if waiting else "")
         top_right = [scope_pill, git_pill] if wide else []
         room = cols - 1 - width(after) - sum(width(text) + 1 for _, text in top_right) - 1 - 4
-        label = sanitize(entry.path) if entry else "no files"
+        label = f"commit {self.revision_oid[:7]}" if self.revision_oid else sanitize(entry.path) if entry else "no files"
         if width(label) > room:
             label = "\u2026" + tail(label, max(1, room - 1))
         self._bar_spans = {}
@@ -482,8 +486,17 @@ class ChangesMixin:
                 fact = "no upstream"
             items.append((_fg(fact, rgb_fg(MUTED), plain), "", None))
             items.extend((label, key, ("git", action)) for action, label, key in GIT_MENU)
+        elif kind == "revision":
+            items.append(("\u2713 Uncommitted" if not self.revision_oid else "  Uncommitted", "", ("rev", None)))
+            result = self.transport.run(commit_list_argv(info["workspace"].path), env=self.env, timeout=5, cwd=info["workspace"].path)
+            note = "excluding remotes" if result and "--remotes" in (result.stdout or "") else ""
+            if note:
+                items.append((_fg(note, rgb_fg(MUTED), plain), "", None))
+            for row in parse_commit_list((result.stdout if result else "") or ""):
+                mark = "\u2713 " if row["oid"] == self.revision_oid else "  "
+                items.append((mark + row["subject"], row["oid"][:7], ("rev", row["oid"])))
         elif kind == "more":
-            if entry is not None:
+            if entry is not None and not self.revision_oid:
                 staged = entry.group == "staged"
                 items.append(("Unstage file" if staged else "Stage file", "u" if staged else "s", ("git", "unstage" if staged else "stage")))
             if self.diff_view is not None and self.diff_view["lines"]:
@@ -492,8 +505,30 @@ class ChangesMixin:
             if len(entries) > 1:
                 items.append(("Previous file", "[", ("step", -1)))
                 items.append(("Next file", "]", ("step", 1)))
+            items.append(("Revisions", "", ("revisions",)))
             items.append(("Refresh", "r", ("refresh",)))
+            items.extend((label, "", action) for label, action in self._review_choices())
         return items
+
+    def _review_choices(self):
+        """[(label, action)] of the skill toggles and Run review; none without a review command."""
+        review = getattr(self.config, "review", None)
+        if review is None:
+            return []
+        rows = []
+        for skill in skill_catalog(review.skills, (self.diff_view or {}).get("workspace")):
+            name = skill["path"].rstrip("/").split("/")[-1]
+            mark = "\u2713 " if skill["path"] in self.review_skills else "  "
+            note = "" if skill["usable"] else " disabled"
+            rows.append((mark + name + note, ("skill", skill["path"]) if skill["usable"] else None))
+        rows.append(("Run review", ("review",)))
+        return rows
+
+    def _toggle_skill(self, path):
+        if path in self.review_skills:
+            self.review_skills = [item for item in self.review_skills if item != path]
+        else:
+            self.review_skills = [*self.review_skills, path]
 
     def _toggle_menu(self, kind):
         if self.changes_menu is not None and self.changes_menu["kind"] == kind:
@@ -584,8 +619,22 @@ class ChangesMixin:
             self._diff_key("v")
         elif kind == "step":
             self._step_file(action[1])
+        elif kind == "revisions":
+            self.changes_menu = {"kind": "revision", "cursor": 0}
+            return
+        elif kind == "rev":
+            self.revision_oid = action[1]
+            info = self._ws_info(self.target) if self.target else None
+            ws = info.get("workspace") if info else None
+            self.revision_parent = read_commit_parent(self.transport.run, ws.path, action[1], self.env) if action[1] and ws and ws.path else None
+            self.diff_view = None
+            self._ensure_diff()
         elif kind == "refresh":
             self.refresh(manual=True)
+        elif kind == "skill":
+            self._toggle_skill(action[1])
+        elif kind == "review":
+            self._arm_review()
 
     def _pick_file(self, index):
         entries = self._change_entries()
@@ -623,29 +672,38 @@ class ChangesMixin:
 
     # ---- the selected file's diff ----------------------------------------------------
     def _ensure_diff(self):
-        """Load the selected file's diff; re-read it when the file or the workspace status
-        changes, keeping the file (by group and path, else by path), the cursor and the range
-        on the same rows when they still exist."""
+        """Load the selected file's diff (or the chosen commit's); re-read it when the file or the
+        workspace status changes, keeping the file (by group and path, else by path), the cursor
+        and the range on the same rows when they still exist."""
+        if self.review_source == "pr":
+            return
         entries = self._change_entries()
         info = self._ws_info(self.target) if self.target else None
         ws = info.get("workspace") if info else None
-        if not entries or ws is None or not ws.path:
+        oid = self.revision_oid
+        if ws is None or not ws.path or (not entries and not oid):
             self.diff_view = None
             return
-        pick = self.changes_pick
-        found = [index for index, item in enumerate(entries) if pick and (item.group, item.path) == pick]
-        found = found or [index for index, item in enumerate(entries) if pick and item.path == pick[1]]
-        self.changes_cursor = found[0] if found else min(self.changes_cursor, len(entries) - 1)
-        entry = entries[self.changes_cursor]
-        self.changes_pick = (entry.group, entry.path)
-        key = (tuple(self.target["key"]), ws.path, entry, info.get("at"))
+        if oid:
+            entry = FileEntry("commit", "C", f"commit {oid[:7]}")
+        else:
+            pick = self.changes_pick
+            found = [index for index, item in enumerate(entries) if pick and (item.group, item.path) == pick]
+            found = found or [index for index, item in enumerate(entries) if pick and item.path == pick[1]]
+            self.changes_cursor = found[0] if found else min(self.changes_cursor, len(entries) - 1)
+            entry = entries[self.changes_cursor]
+            self.changes_pick = (entry.group, entry.path)
+        key = (tuple(self.target["key"]), ws.path, entry, None if oid else info.get("at"), oid)
         view = self.diff_view
         if view is not None and view["key"] == key:
             return
         job = self._diff_job
         if job is None or job[0] != key:
             path = ws.path
-            job = self._diff_job = (key, self.submit(lambda: read_diff(self.transport.run, path, entry, self.env)))
+            if oid:
+                job = self._diff_job = (key, self.submit(lambda: read_commit_diff(self.transport.run, path, oid, self.env)))
+            else:
+                job = self._diff_job = (key, self.submit(lambda: read_diff(self.transport.run, path, entry, self.env)))
         same_file = view is not None and view["entry"] == entry and view["workspace"] == ws.path
         if not job[1].done():
             if not same_file:
@@ -656,7 +714,10 @@ class ChangesMixin:
             text, error = job[1].result()
         except Exception:
             text, error = "", "unavailable: git diff failed"
-        lines = [line for line in parse_diff(text) if not (line.kind == "h" and line.text.startswith(HIDDEN_HEADERS))]
+        parsed = parse_diff(text)
+        paths = patch_line_paths(text) if oid else [None] * len(parsed)
+        kept = [(line, path) for line, path in zip(parsed, paths) if not (line.kind == "h" and line.text.startswith(HIDDEN_HEADERS))]
+        lines = [line for line, _ in kept]
         cursor = next((index for index, line in enumerate(lines) if line.kind in "+-"), 0)
         mark, top, xoff = None, 0, 0
         if same_file and view["key"] is not None:
@@ -665,6 +726,9 @@ class ChangesMixin:
             top, xoff = view["top"], view.get("xoff", 0)
         self.diff_view = self._diff_view(key, entry, ws.path, info, lines, error, cursor, mark, top)
         self.diff_view["xoff"] = xoff
+        self.diff_view["patch"] = text
+        self.diff_view["paths"] = [path for _, path in kept] if oid else None
+        self.diff_view["revision"] = oid or "uncommitted"
 
     def _diff_view(self, key, entry, path, info, lines, error, cursor=0, mark=None, top=0):
         status = info.get("status")
@@ -701,9 +765,17 @@ class ChangesMixin:
         after, display = {}, []
         for draft in drafts:
             anchor = draft["anchor"]
-            if (anchor.get("group"), anchor.get("path")) != (entry.group, entry.path):
+            if view.get("paths"):
+                if anchor.get("group") != "commit" or anchor.get("revision") != view["revision"] or anchor.get("path") not in view["paths"]:
+                    continue
+            elif (anchor.get("group"), anchor.get("path")) != (entry.group, entry.path):
                 continue
-            span = locate(anchor, lines)
+            if view.get("paths"):
+                own = [at for at, path in enumerate(view["paths"]) if path == anchor.get("path")]
+                found = locate(anchor, [lines[at] for at in own])
+                span = (own[found[0]], own[found[1]]) if found else None
+            else:
+                span = locate(anchor, lines)
             if self._footer_holds(draft):
                 continue
             if span is None:
@@ -736,22 +808,22 @@ class ChangesMixin:
         top = max(0, min(top, len(display) - rows))
         view["top"] = top
         icon_at = None
-        if self.focus == "list" and self.changes_menu is None:
+        if self.focus == "list" and self.changes_menu is None and self.review_source == "workspace":
             icon_at = next((index for index in range(low, high + 1) if index < len(lines) and lines[index].kind in "+- "), None)
-        code_path = None if plain else entry.path
         out = []
         for item in display[top : top + rows]:
             if isinstance(item, tuple):
                 out.append(item)
             else:
-                out.append(self._diff_line(item, digits, (low, high), item == icon_at, code_path, plain))
+                out.append(self._diff_line(item, digits, (low, high), item == icon_at, plain))
         return out
 
-    def _diff_line(self, index, digits, selection, icon, code_path, plain):
+    def _diff_line(self, index, digits, selection, icon, plain):
         """One diff row: old and new line numbers, a rule (an accent bar on selected lines),
         the sign, then the code, tinted to the pane edge on added and deleted lines."""
         view = self.diff_view
         line = view["lines"][index]
+        code_path = None if plain else self._line_path(view, index)
         cols = self.cols
         gutter_width = 2 * digits + 4
         hit = {"kind": "diffline", "index": index}
@@ -771,6 +843,9 @@ class ChangesMixin:
         if icon:
             offer = f" {ADD_COMMENT} " if cols - gutter_width >= 40 else f" {ADD_SHORT} "
             hit["icon"] = cols - width(offer) + 2
+        marker = self._finding_marker(index)
+        if marker:
+            offer = marker + offer
         room = max(0, cols - gutter_width - 4 - width(offer))
         code = sanitize(line.text).expandtabs(4)
         xoff = view.get("xoff", 0)
@@ -809,26 +884,102 @@ class ChangesMixin:
 
     def _diff_key(self, key):
         view = self.diff_view
-        last = max(0, len(view["lines"]) - 1)
-        page = max(1, self.rows // 2)
-        steps = {"j": 1, "down": 1, "shift-down": 1, "k": -1, "up": -1, "shift-up": -1, "pagedown": page, "pageup": -page}
-        if key in steps:
-            if key.startswith("shift-") and view.get("mark") is None:
-                view["mark"] = view["cursor"]
-            view["cursor"] = min(max(view["cursor"] + steps[key], 0), last)
-        elif key == "v":
-            view["mark"] = None if view.get("mark") is not None else view["cursor"]
-        elif key in ("enter", "m"):
+        if key in ("enter", "m", "ctrl-enter"):
             self._open_diff_message()
-        elif key == "esc" and view.get("mark") is not None:
-            view["mark"] = None
-        elif key in ("left", "h", "right", "l"):
-            longest = max((width(sanitize(line.text).expandtabs(4)) for line in view["lines"]), default=0)
-            step = SCROLL_STEP if key in ("right", "l") else -SCROLL_STEP
-            view["xoff"] = max(0, min(view.get("xoff", 0) + step, longest - SCROLL_STEP))
-        else:
-            return False
-        return True
+            return True
+        before = self._jump_frame()
+        view["jumps"] = self.review_jumps
+        moved = key == "G" or (key == "g" and view.get("prefix") == "g")
+        result = apply_key(view, key, rows=self.rows)
+        if result["status"]:
+            self.status = result["status"]
+        if moved and before is not None and view["cursor"] != before[3]:
+            push_jump(view, before)
+        if result["jumped"]:
+            self._restore_jump(result["jumped"])
+        if result["handled"]:
+            self._note_finding()
+        return result["handled"]
+
+    def _line_path(self, view, index):
+        """The file a diff row belongs to: its own header's path in a multi-file patch."""
+        paths = view.get("paths")
+        return (paths[index] if paths and index < len(paths) else None) or view["entry"].path
+
+    def _jump_frame(self):
+        view = self.diff_view
+        lines = (view or {}).get("lines")
+        if not lines:
+            return None
+        cursor = min(max(view.get("cursor") or 0, 0), len(lines) - 1)
+        return (self.review_source, self._review_revision(), self._line_path(view, cursor), cursor, view.get("xoff", 0))
+
+    def _record_jump(self):
+        frame = self._jump_frame()
+        if frame is not None:
+            self.review_jumps.append(frame)
+
+    def _jump_back(self):
+        if not self.review_jumps:
+            self.status = "no earlier position"
+            return
+        self._restore_jump(self.review_jumps.pop())
+
+    def _finding_at(self, index):
+        view = self.diff_view or {}
+        if not self.review_findings or not view.get("lines") or self.review_origin != self._review_origin():
+            return None
+        line = view["lines"][index]
+        path = self._line_path(view, index)
+        for finding in self.review_findings:
+            number = line.new if finding.get("side") == "new" else line.old
+            if finding.get("path") == path and finding.get("start_line") == number:
+                return finding
+        return None
+
+    def _finding_marker(self, index):
+        finding = self._finding_at(index)
+        if finding is None:
+            return ""
+        return " stale " if finding.get("stale") else " ! "
+
+    def _note_finding(self):
+        view = self.diff_view or {}
+        lines = view.get("lines") or []
+        if not lines or self.review_origin != self._review_origin():
+            return
+        recorded = getattr(self, "review_head", None)
+        current = view.get("head")
+        scope = getattr(self, "review_scope_name", "uncommitted")
+        listed = True
+        if scope == "pr_commit":
+            commits = (((self._pr_detail(self._current_pr()) or {}).get("view")) or {}).get("commits")
+            listed = commits is None or any(item.get("oid") == recorded for item in commits)
+        self.review_findings = mark_findings(
+            self.review_findings,
+            scope=scope,
+            head_moved=bool(recorded and current and recorded != current),
+            listed=listed,
+        )
+        finding = self._finding_at(min(view.get("cursor") or 0, len(lines) - 1))
+        if finding is not None:
+            self.status = finding.get("stale") or finding.get("title") or "finding"
+
+    def _restore_jump(self, frame):
+        source, revision, path, cursor, xoff = frame
+        if source != self.review_source:
+            self._set_review_source(source, record=False)
+        view = self.diff_view
+        lines = (view or {}).get("lines")
+        if not lines or view.get("revision") != revision or self._line_path(view, min(cursor, len(lines) - 1)) != path:
+            self.status = "earlier position is no longer open"
+            return
+        view["cursor"] = min(cursor, len(lines) - 1)
+        view["mark"] = None
+        view["xoff"] = xoff
+        view["col"] = xoff
+        if self.review_source == "pr":
+            self.pr_diff_open = True
 
     def _changes_mouse(self, hit, column, gesture):
         """`press`, `shift` (Shift-click) or `drag` on a control, a menu row or a diff line."""
@@ -891,6 +1042,9 @@ class ChangesMixin:
     def _open_diff_message(self):
         """Open the inline message for every selected diff line."""
         view = self.diff_view
+        if self.review_source == "pr":
+            self.status = "messages attach to the workspace diff, not the PR diff"
+            return
         if view.get("error") or not view["lines"]:
             self.status = "no diff lines to write about"
             return
@@ -904,9 +1058,16 @@ class ChangesMixin:
         side = "new" if any(line.kind == "+" for line in chosen) or not any(line.kind == "-" for line in chosen) else "old"
         numbers = news if side == "new" else olds
         entry = view["entry"]
+        path = entry.path
+        if view.get("paths"):
+            paths = {self._line_path(view, index) for index in range(low, high + 1) if view["lines"][index].kind in "+- "}
+            if len(paths) != 1:
+                self.status = "select lines of one file to write about"
+                return
+            path = paths.pop()
         record = {
             "kind": "diff",
-            "path": entry.path,
+            "path": path,
             "orig": entry.orig,
             "code": entry.code,
             "group": entry.group,
@@ -919,6 +1080,8 @@ class ChangesMixin:
             "new_end": max(news) if news else None,
             "head": view.get("head"),
             "branch": view.get("branch"),
+            "source": "workspace",
+            "revision": view.get("revision") or "uncommitted",
             "blob": content_id(self.transport.run, view["workspace"], entry, self.env, side=side),
             "workspace": view["workspace"],
             "rows": [[line.kind, line.old, line.new, line.text] for line in chosen],
@@ -951,6 +1114,9 @@ class ChangesMixin:
         paths = []
         message_path = None
         if action in ("stage", "unstage"):
+            if self.revision_oid:
+                self.status = f"{action}: choose Uncommitted first"
+                return
             entries = self._change_entries()
             if not entries:
                 self.status = f"{action}: no file selected"

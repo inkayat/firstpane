@@ -112,7 +112,7 @@ class BrowserTabMixin:
             lines += [(" " + paint(bar, rgb_fg(INK), plain), None)] if bar else []
         else:
             for text, sgr in ((bar, INK), (sanitize(self.placed.describe()), INK),
-                              (f"opens in: {PLACEMENT_LABELS[self.browser_placement]} (6 Settings) \u00b7 f brings it forward"
+                              (f"opens in: {PLACEMENT_LABELS[self.browser_placement]} (, Settings) \u00b7 f brings it forward"
                                " \u00b7 a captures the page \u00b7 x closes it", MUTED)):
                 lines += [(" " + paint(part, rgb_fg(sgr), plain), None) for part in (word_wrap(text, max(1, self.cols - 1)) if text else [])]
         anchor = (self.draft or {}).get("anchor") or {}

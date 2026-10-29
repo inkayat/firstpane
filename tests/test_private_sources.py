@@ -183,7 +183,7 @@ class PrivateSourceTests(unittest.TestCase):
         """(app, (Pull Requests tab text, the project paths it queried with git))."""
         self.transport.calls = []
         app, _ = self.listed()
-        app.handle_key("4")
+        (app.handle_key("2"), None if app.review_source == "pr" else app.handle_key("\\"))
         queried = {call["argv"][2] for call in self.transport.calls if call["argv"][1:2] == ["-C"] and "remote" in call["argv"]}
         return app, (strip_sgr(app.render()), queried)
 
@@ -418,7 +418,7 @@ class PrivateSourceTests(unittest.TestCase):
         app.refresh(manual=True)
         self.assertIsNone(app.target)
         self.assertIn("Enter Select", strip_sgr(app.render()).splitlines()[-1])
-        app.handle_key("3")
+        app.handle_key("5")
         self.assertIn("press Enter", strip_sgr(app.render()))
         app.handle_key("1")
         app.handle_key("enter")
