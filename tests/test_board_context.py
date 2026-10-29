@@ -431,6 +431,29 @@ class AgentsEntryTests(BadgeFixture):
                     self.assertEqual(app.tab, "board")
                     self.assertEqual(app.board_selected, want)
 
+    def test_enter_waits_while_any_decision_key_of_the_agent_is_unread(self):
+        # Break: a verified call is opened while another of the agent's open calls is unread and may make it ambiguous.
+        worker = "alter-050-team-lead"
+        for ids, keys, origins in (
+            ([worker, "call-a"], ["call-a"], {"call-a": worker}),
+            (["call-a", "call-b"], ["call-a", "call-b"], {"call-a": worker, "call-b": worker}),
+        ):
+            with self.subTest(ids=ids):
+                self.transport.handlers.clear()
+                app = self.linked_app(keys, origins, ids, failing=(keys[-1],))
+                app.handle_key("enter")
+                self.assertEqual(app.tab, "agents")
+                self.assertEqual(app.status, "still reading Board links")
+                self.assertIn("Agents \u26a0 1?", self.plain_tab(app))
+                self.transport.handlers.insert(0, (
+                    lambda argv: len(argv) > 1 and argv[1] == "show" and "--full" in argv,
+                    lambda call: CmdResult(0, show_text(call["argv"][2], body="Ready.\\nCaptain hold origin: " + worker)),
+                ))
+                self.reload_board(app)
+                app.handle_key("enter")
+                self.assertEqual(app.tab, "agents")
+                self.assertEqual(app.status, "no linked Board task")
+
     def test_an_unreadable_origin_is_not_a_link_until_a_later_read_succeeds(self):
         # Break: a failed show is treated as an unrecorded origin and the call is counted or opened unverified.
         app = self.linked_app(["call-a"], {}, ["call-a"], failing=("call-a",))

@@ -965,6 +965,8 @@ class BoardMixin:
         claims = sum(1 for meta in metas if meta.get("herdr_pane_id") == pane_id)
         if len(bound) != 1 or bound[0].get("herdr_pane_id") != pane_id or claims != 1:
             return None
+        if any(key in self.board_origin_unread for key in bound[0].get("decision_keys") or []):
+            return None
         requests = explicit_request_ids(bound[0], self.board_tasks, self.board_origins)
         return requests[0] if len(requests) == 1 else None
 
