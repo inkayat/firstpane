@@ -8,6 +8,7 @@ import os
 import unittest
 
 from firstpane.config import Config
+from firstpane.diffview import NO_SYMBOL
 from firstpane.review import RESULT_SCHEMA, ReviewConfig
 from firstpane.termframe import TermGrid
 from firstpane.workspace import FileEntry, parse_diff
@@ -94,6 +95,21 @@ class WorkspaceReviewTests(PanelFixture):
         app.render()
         self.assertEqual(app.status, "stale: HEAD moved")
         self.assertEqual(app.review_findings[0]["stale"], "stale: HEAD moved")
+
+    def test_gd_and_gI_in_the_review_diff_report_no_symbol_support_without_moving(self):
+        # Break: "g" opens the Git menu before the diff viewport sees it, so gd/gI do nothing.
+        self.changed_readme()
+        app = self.app()
+        self.open_changes(app)
+        app.render()
+        for second in ("d", "I"):
+            app.status = ""
+            cursor = app.diff_view["cursor"]
+            app.handle_key("g")
+            self.assertIsNone(app.changes_menu)
+            app.handle_key(second)
+            self.assertEqual(app.status, NO_SYMBOL)
+            self.assertEqual(app.diff_view["cursor"], cursor)
 
     def test_a_running_review_is_not_started_twice(self):
         # Break: a second Run review replaces the supervisor and orphans the running child.
