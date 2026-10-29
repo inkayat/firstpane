@@ -102,46 +102,106 @@ def build_request(*, run_id, created_at, skills, repository, scope, revision, fi
     }
 
 
-def patch_files(patch_text):
-    """The request's file rows, read from the patch's own diff headers."""
-    files = []
-    for line in parse_diff(patch_text):
+_ESCAPES = {"a": 7, "b": 8, "f": 12, "n": 10, "r": 13, "t": 9, "v": 11, "\\": 92, '"': 34}
+
+
+def _quoted_end(text):
+    """Index of the quote closing the git-quoted token that starts `text`, or -1."""
+    index = 1
+    while index < len(text):
+        if text[index] == "\\":
+            index += 2
+            continue
+        if text[index] == '"':
+            return index
+        index += 1
+    return -1
+
+
+def _unquote(token):
+    """A path as git prints it: plain, or in double quotes with C and octal escapes."""
+    if not token.startswith('"') or _quoted_end(token) != len(token) - 1:
+        return token
+    body, out, index = token[1:-1], bytearray(), 0
+    while index < len(body):
+        char = body[index]
+        if char != "\\" or index + 1 >= len(body):
+            out += char.encode()
+            index += 1
+            continue
+        nxt = body[index + 1]
+        digits = body[index + 1 : index + 4]
+        if len(digits) == 3 and all(d in "01234567" for d in digits):
+            out.append(int(digits, 8) & 0xFF)
+            index += 4
+        else:
+            out.append(_ESCAPES.get(nxt, ord(nxt) if ord(nxt) < 128 else 63))
+            index += 2
+    return out.decode("utf-8", "replace")
+
+
+def _header_path(rest):
+    """The new path of a `diff --git <a> <b>` header's operands."""
+    if rest.startswith('"'):
+        end = _quoted_end(rest)
+        second = rest[end + 2 :] if end != -1 else ""
+    elif ' "b/' in rest:
+        second = '"b/' + rest.split(' "b/', 1)[1]
+    else:
+        half = (len(rest) - 1) // 2
+        if len(rest) % 2 == 1 and rest[half] == " " and rest[:2] == "a/" and rest[half + 1 : half + 3] == "b/" and rest[2:half] == rest[half + 3 :]:
+            second = rest[half + 1 :]
+        elif " b/" in rest:
+            second = "b/" + rest.rsplit(" b/", 1)[1]
+        else:
+            return None
+    path = _unquote(second)
+    return path[2:] if path.startswith("b/") else None
+
+
+def _scan(patch_text):
+    """(file rows, file path of each parse_diff row) read from the patch's own headers."""
+    rows = parse_diff(patch_text)
+    files, starts = [], []
+    for index, line in enumerate(rows):
         if line.kind != "h":
             continue
         text = line.text
-        if text.startswith("diff --git ") and " b/" in text:
-            path = text.split(" b/", 1)[1]
-            files.append({"path": path, "old_path": None, "status": "modified", "old_blob": None, "new_blob": None})
+        if text.startswith("diff --git "):
+            path = _header_path(text[len("diff --git ") :])
+            if path is not None:
+                files.append({"path": path, "old_path": None, "status": "modified", "old_blob": None, "new_blob": None})
+                starts.append(index)
         elif files and text.startswith("new file mode"):
             files[-1]["status"] = "added"
         elif files and text.startswith("deleted file mode"):
             files[-1]["status"] = "deleted"
         elif files and text.startswith("rename from "):
-            files[-1].update(status="renamed", old_path=text[len("rename from "):])
-    return files
+            files[-1].update(status="renamed", old_path=_unquote(text[len("rename from ") :]))
+        elif files and text.startswith("rename to "):
+            files[-1]["path"] = _unquote(text[len("rename to ") :])
+    paths = [None] * len(rows)
+    for file, start, stop in zip(files, starts, starts[1:] + [len(rows)]):
+        for index in range(start, stop):
+            paths[index] = file["path"]
+    return files, paths
+
+
+def patch_files(patch_text):
+    return _scan(patch_text)[0]
 
 
 def patch_line_paths(patch_text):
-    """The file path of each parse_diff row of `patch_text`, in order."""
-    paths, current = [], None
-    for line in parse_diff(patch_text):
-        if line.kind == "h" and line.text.startswith("diff --git ") and " b/" in line.text:
-            current = line.text.split(" b/", 1)[1]
-        paths.append(current)
-    return paths
+    return _scan(patch_text)[1]
 
 
 def _spans(patch_text):
     """{path: {side: [(start, end)]}} from hunk headers. A range must sit inside one of them."""
     spans = {}
-    path = None
-    for line in parse_diff(patch_text):
-        if line.kind == "h" and line.text.startswith("diff --git "):
-            path = line.text.split(" b/", 1)[1] if " b/" in line.text else None
-            spans.setdefault(path, {"new": [], "old": []})
-            continue
+    for line, path in zip(parse_diff(patch_text), patch_line_paths(patch_text)):
         if line.kind != "@" or path is None:
             continue
+        spans.setdefault(path, {"new": [], "old": []})
         parts = line.text.split("@@")[1].strip().split()
         for token in parts[:2]:
             side = "old" if token.startswith("-") else "new" if token.startswith("+") else None

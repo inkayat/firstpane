@@ -244,6 +244,15 @@ def diff_argv(path, entry):
     return git_argv(path, *common, "--", entry.path)
 
 
+def read_commit_parent(run, path, oid, env):
+    """The first parent of commit `oid`, or None for a root commit or on failure."""
+    if not isinstance(oid, str) or not _OID.match(oid):
+        return None
+    result = run(git_argv(path, "rev-parse", "--verify", "-q", oid + "^1"), env=read_env(env), timeout=STATUS_TIMEOUT, cwd=path)
+    value = (result.stdout or "").strip()
+    return value if result.code == 0 and not result.timed_out and re.fullmatch(r"[0-9a-f]{40,64}", value) else None
+
+
 def read_commit_diff(run, path, oid, env, timeout=DIFF_TIMEOUT):
     result = run(commit_diff_argv(path, oid), env=read_env(env), timeout=timeout, cwd=path)
     if result.timed_out:

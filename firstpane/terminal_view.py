@@ -120,6 +120,7 @@ from firstpane.sanitize import sanitize
 from firstpane.termframe import TermGrid
 
 CREATE_TIMEOUT = 3
+DESYNC = "Terminal output not understood; the screen may be out of date until the next full frame"
 
 
 def terminal_key(directory):
@@ -235,7 +236,7 @@ class TerminalMixin:
             self._terminal_create(directory)
             record = self._terminal_book_for().find(directory)
         if record and record.get("state") == "ready" and record.get("terminal_id"):
-            if not self.terminal_status.startswith("Terminal output"):
+            if self.terminal_status != DESYNC:
                 self.terminal_status = ""
             self._terminal_attach(record)
             self._terminal_sync_size()
@@ -330,11 +331,11 @@ class TerminalMixin:
                 width = int(payload.get("width") or self.cols)
                 height = int(payload.get("height") or max(2, self.rows - 2))
             except (ValueError, TypeError, AttributeError, binascii.Error):
-                self.terminal_status = "Terminal output not understood; showing the last good frame"
+                self.terminal_status = DESYNC
                 continue
             if self.terminal_grid.apply(data, bool(payload.get("full")), width, height):
-                self.terminal_status = "Terminal output not understood; showing the last good frame"
-            elif self.terminal_status.startswith("Terminal output"):
+                self.terminal_status = DESYNC
+            elif payload.get("full") and self.terminal_status == DESYNC:
                 self.terminal_status = ""
 
     def _terminal_release(self):
@@ -352,6 +353,8 @@ class TerminalMixin:
         self._terminal_release()
         self.terminal_grid = TermGrid()
         self._terminal_size = None
+        if self.terminal_status == DESYNC:
+            self.terminal_status = ""
 
     def _terminal_raw(self, data):
         control = getattr(self, "terminal_control", None)

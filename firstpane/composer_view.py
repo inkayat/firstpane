@@ -18,9 +18,10 @@ from pathlib import Path
 from firstpane.cells import fit, tail, width
 from firstpane.handoff import Handoff
 from firstpane.message import build_message
+from firstpane.review import patch_line_paths
 from firstpane.sanitize import sanitize
 from firstpane.style import ACCENT, FIELD_BG, INK, MUTED, PINK, SEND_BG, YELLOW, paint, rgb_bg, rgb_fg
-from firstpane.workspace import FileEntry, parse_diff, read_diff
+from firstpane.workspace import FileEntry, parse_diff, read_commit_diff, read_diff
 
 ATTEMPTED = ("unknown", "saved-unannounced")
 EDITOR_ROWS = 3
@@ -54,6 +55,8 @@ def anchor_key(record):
     """Identity of a selection: the same lines (or page selection) reopen the same draft."""
     if record.get("kind") == "diff":
         basis = ["diff", record.get("workspace"), record.get("group"), record.get("path"), record.get("rows")]
+        if record.get("group") == "commit":
+            basis.append(record.get("revision"))
     elif record.get("kind") == "pr-thread":
         basis = ["pr-thread", record.get("slug"), record.get("number"), record.get("thread_id")]
     else:
@@ -355,6 +358,10 @@ class ComposerMixin:
     def _lines_changed(self, item):
         """True when the selected rows are no longer in the file's current diff."""
         entry = FileEntry(item.get("group"), item.get("code") or "M", item.get("path"), item.get("orig"))
+        if item.get("group") == "commit":
+            text, error = read_commit_diff(self.transport.run, item.get("workspace"), item.get("revision"), self.env)
+            mine = [line for line, path in zip(parse_diff(text), patch_line_paths(text)) if path == item.get("path")]
+            return bool(error) or locate(item, mine) is None
         text, error = read_diff(self.transport.run, item.get("workspace"), entry, self.env)
         return bool(error) or locate(item, parse_diff(text)) is None
 

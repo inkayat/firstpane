@@ -138,6 +138,7 @@ class WorkspaceReviewTests(PanelFixture):
         request = reviewer.requests[0]
         self.assertEqual(request["scope"], "commit")
         self.assertEqual(request["revision"]["commit"], oid)
+        self.assertEqual(request["revision"]["parent"], self.fx.git(self.wt_a, "rev-parse", oid + "^"))
         self.assertEqual([row["path"] for row in request["files"]], ["one.txt", "two.txt"])
         self.assertEqual({row["status"] for row in request["files"]}, {"added"})
         app.poll()
@@ -146,6 +147,44 @@ class WorkspaceReviewTests(PanelFixture):
         marked = [index for index in range(len(lines)) if app._finding_marker(index)]
         self.assertEqual([view["paths"][index] for index in marked], ["two.txt"])
         self.assertIn(" ! ", app._finding_marker(marked[0]))
+
+    def test_quoted_non_ascii_paths_are_reviewed_under_their_real_names(self):
+        # Break: git's quoted header ("a/\\303\\251.txt") is skipped, so the commit has no files
+        # to review or findings on that file are dropped.
+        self.fx.write("\u00e9.txt", "caf\u00e9\n", root=self.wt_a)
+        self.fx.git(self.wt_a, "add", "-A")
+        self.fx.git(self.wt_a, "commit", "-q", "-m", "accent")
+        oid = self.fx.head(self.wt_a)
+        app = self.app()
+        self.open_changes(app)
+        app._menu_pick(("rev", oid))
+        reviewer = FakeReviewer([finding("\u00e9.txt", 1)])
+        self.start(app, reviewer)
+        self.assertEqual([row["path"] for row in reviewer.requests[0]["files"]], ["\u00e9.txt"])
+        app.poll()
+        self.assertEqual(app.status, "review complete: 1 findings")
+        self.assertEqual(set(app.diff_view["paths"]) - {None}, {"\u00e9.txt"})
+
+    def test_a_message_in_a_commit_diff_names_the_lines_real_file_and_never_spans_files(self):
+        # Break: the draft is attached to a fake "commit abc1234" path, or one draft mixes files.
+        oid = self.commit_two_files()
+        app = self.app()
+        self.open_changes(app)
+        app._menu_pick(("rev", oid))
+        view = app.diff_view
+        second = next(index for index, line in enumerate(view["lines"]) if view["paths"][index] == "two.txt" and line.kind == "+")
+        view["cursor"], view["mark"] = second, None
+        app._open_diff_message()
+        anchor = app.draft["anchor"]
+        self.assertEqual((anchor["path"], anchor["group"], anchor["revision"]), ("two.txt", "commit", oid))
+        app.handle_key("esc")
+        app.draft = None
+        first = next(index for index, line in enumerate(view["lines"]) if view["paths"][index] == "one.txt" and line.kind == "+")
+        view["cursor"], view["mark"] = first, second
+        app.status = ""
+        app._open_diff_message()
+        self.assertEqual(app.status, "select lines of one file to write about")
+        self.assertIsNone(app.draft)
 
     def test_switching_agent_drops_the_commit_pin_and_the_other_agents_findings(self):
         # Break: the pinned commit runs in another repository, or agent A's findings are drawn
@@ -362,6 +401,8 @@ class TerminalLifecycleTests(PanelFixture):
         self.assertNotIn("\x9b", "".join(app.terminal_grid.rows(False)))
         send({"type": "terminal.frame", "bytes": good, "width": "wide", "height": 2})
         self.assertTrue(app.terminal_status.startswith("Terminal output"))
+        send({"type": "terminal.frame", "bytes": good, "full": False, "width": 10, "height": 2})
+        self.assertTrue(app.terminal_status.startswith("Terminal output"))
         send({"type": "terminal.frame", "bytes": good, "full": True, "width": 10, "height": 2})
         self.assertEqual(app.terminal_status, "")
 
@@ -435,3 +476,25 @@ class _Terminal:
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PatchHeaderTests(unittest.TestCase):
+    PATCH = (
+        'diff --git "a/\\303\\251.txt" "b/\\303\\251.txt"\nnew file mode 100644\n--- /dev/null\n+++ "b/\\303\\251.txt"\n@@ -0,0 +1 @@\n+x\n'
+        "diff --git a/d b/e/f.txt b/d b/e/f.txt\n--- a/d b/e/f.txt\n+++ b/d b/e/f.txt\n@@ -1 +1 @@\n-a\n+b\n"
+        "diff --git a/o.txt b/n.txt\nsimilarity index 90%\nrename from o.txt\nrename to n.txt\n@@ -1 +1 @@\n-a\n+b\n"
+    )
+
+    def test_files_and_row_paths_come_from_the_headers_whatever_the_quoting(self):
+        # Break: quoted headers vanish, a directory named "d b" splits the path, or a rename
+        # keeps the old name for its rows.
+        from firstpane.review import _spans, patch_files, patch_line_paths
+
+        files = patch_files(self.PATCH)
+        self.assertEqual([(row["path"], row["old_path"], row["status"]) for row in files], [
+            ("é.txt", None, "added"), ("d b/e/f.txt", None, "modified"), ("n.txt", "o.txt", "renamed"),
+        ])
+        paths = patch_line_paths(self.PATCH)
+        self.assertEqual(len(paths), len(parse_diff(self.PATCH)))
+        self.assertEqual(set(paths), {"é.txt", "d b/e/f.txt", "n.txt"})
+        self.assertEqual(set(_spans(self.PATCH)), {"é.txt", "d b/e/f.txt", "n.txt"})

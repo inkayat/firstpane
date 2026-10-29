@@ -32,7 +32,7 @@ from firstpane.style import (
     rgb_fg,
 )
 from firstpane.syntax import ROLE_SGR, tokens
-from firstpane.workspace import FileEntry, Workspace, commit_list_argv, content_id, parse_commit_list, parse_diff, read_commit_diff, read_counts, read_diff, read_status, resolve_workspace
+from firstpane.workspace import FileEntry, Workspace, commit_list_argv, content_id, parse_commit_list, parse_diff, read_commit_diff, read_commit_parent, read_counts, read_diff, read_status, resolve_workspace
 
 WS_CADENCE = 10
 QUIET = ("idle", "done")
@@ -357,6 +357,8 @@ class ChangesMixin:
         rows.extend(self._earlier_rows(plain))
         changed = {(entry.group, entry.path) for entry in status.entries}
         for draft in drafts:
+            if draft["anchor"].get("group") == "commit":
+                continue
             if (draft["anchor"].get("group"), draft["anchor"].get("path")) not in changed and not self._footer_holds(draft):
                 rows.extend(self._inline_rows(draft, plain, 1, stale=True))
         avail = budget - len(rows)
@@ -622,6 +624,9 @@ class ChangesMixin:
             return
         elif kind == "rev":
             self.revision_oid = action[1]
+            info = self._ws_info(self.target) if self.target else None
+            ws = info.get("workspace") if info else None
+            self.revision_parent = read_commit_parent(self.transport.run, ws.path, action[1], self.env) if action[1] and ws and ws.path else None
             self.diff_view = None
             self._ensure_diff()
         elif kind == "refresh":
@@ -760,7 +765,10 @@ class ChangesMixin:
         after, display = {}, []
         for draft in drafts:
             anchor = draft["anchor"]
-            if (anchor.get("group"), anchor.get("path")) != (entry.group, entry.path):
+            if view.get("paths"):
+                if anchor.get("group") != "commit" or anchor.get("revision") != view["revision"] or anchor.get("path") not in view["paths"]:
+                    continue
+            elif (anchor.get("group"), anchor.get("path")) != (entry.group, entry.path):
                 continue
             span = locate(anchor, lines)
             if self._footer_holds(draft):
@@ -1045,9 +1053,16 @@ class ChangesMixin:
         side = "new" if any(line.kind == "+" for line in chosen) or not any(line.kind == "-" for line in chosen) else "old"
         numbers = news if side == "new" else olds
         entry = view["entry"]
+        path = entry.path
+        if view.get("paths"):
+            paths = {self._line_path(view, index) for index in range(low, high + 1) if view["lines"][index].kind in "+- "}
+            if len(paths) != 1:
+                self.status = "select lines of one file to write about"
+                return
+            path = paths.pop()
         record = {
             "kind": "diff",
-            "path": entry.path,
+            "path": path,
             "orig": entry.orig,
             "code": entry.code,
             "group": entry.group,
