@@ -86,7 +86,7 @@ class PredicateTests(unittest.TestCase):
             {"task_id": "amb-2", "herdr_pane_id": "pane-amb"},
             {"task_id": "pause", "herdr_pane_id": "pane-blocked"},
         ]
-        self.assertEqual(fn(tasks, agents, metas), ["pane-a", "pane-b"])
+        self.assertEqual(fn(tasks, agents, metas, {}), ["pane-a", "pane-b"])
 
     def test_a_decision_key_links_the_agent_to_the_other_open_call(self):
         # Break: only the worker's own id counts, an answered key counts, two open
@@ -106,15 +106,19 @@ class PredicateTests(unittest.TestCase):
             "decision_keys": ["answered-call", "alter-050-review-package"],
         }
         agents = [{"pane_id": "pane-a", "task_id": "alter-050-team-lead", "status": "blocked"}]
-        self.assertEqual(fn(tasks, agents, [meta]), ["pane-a"])
-        self.assertEqual(links(meta, tasks), ["alter-050-review-package"])
-        self.assertEqual(
-            links(meta, tasks, {"alter-050-review-package": "someone-else"}),
-            [],
-        )
+        mine = {"alter-050-review-package": "alter-050-team-lead", "alter-050-other-call": None}
+        self.assertEqual(fn(tasks, agents, [meta], mine), ["pane-a"])
+        self.assertEqual(links(meta, tasks, mine), ["alter-050-review-package"])
+        self.assertEqual(links(meta, tasks, {"alter-050-review-package": "someone-else"}), [])
+        self.assertEqual(links(meta, tasks, {}), [])
+        self.assertEqual(fn(tasks, agents, [meta], {"alter-050-review-package": "someone-else"}), [])
+        self.assertEqual(fn(tasks, agents, [meta], {}), [])
         two = dict(meta, decision_keys=["alter-050-review-package", "alter-050-other-call"])
-        self.assertEqual(fn(tasks, agents, [two]), ["pane-a"])
-        self.assertEqual(links(two, tasks), ["alter-050-review-package", "alter-050-other-call"])
+        self.assertEqual(fn(tasks, agents, [two], mine), ["pane-a"])
+        self.assertEqual(links(two, tasks, mine), ["alter-050-review-package", "alter-050-other-call"])
+        other = {"alter-050-review-package": "someone-else", "alter-050-other-call": None}
+        self.assertEqual(links(two, tasks, other), ["alter-050-other-call"])
+        self.assertEqual(fn(tasks, agents, [two], other), ["pane-a"])
 
     def test_identity_and_show_parse_the_producer_grammar(self):
         # Break: a lifecycle line or a quoted backlog field is guessed instead of parsed.
@@ -150,6 +154,17 @@ class BadgeFixture(LayoutFixture):
     def lists(self):
         return [call for call in self.transport.calls if call["argv"][-2:] == ["list", "--json"]]
 
+    def named(self, script, sub):
+        return [
+            call for call in self.transport.calls
+            if os.path.basename(call["argv"][0]) == script and len(call["argv"]) > 1 and call["argv"][1] == sub
+        ]
+
+    def reload_board(self, app):
+        app.poll()
+        app._refresh_board(force=True)
+        app.poll()
+
     def bind_waiting(self, app, ident="fp-ask-0001", pane_id="pane-a"):
         write_meta(
             self.home, ident, project="/work/firstpane", herdr_session="lab",
@@ -161,6 +176,7 @@ class BadgeFixture(LayoutFixture):
             "kind": "agent", "pane_id": pane_id, "task_id": ident, "status": "blocked",
             "title": "pi", "key": ("agent", "firstpane", "t1"), "project_key": "firstpane",
         }]}]
+        self.reload_board(app)
 
 
 class BadgeTests(BadgeFixture):
@@ -355,6 +371,99 @@ class AgentsEntryTests(BadgeFixture):
         self.assertEqual(app.tab, "agents")
         self.assertEqual(app.status, "no linked Board task")
 
+    def linked_app(self, keys, origins, ids, failing=()):
+        worker = "alter-050-team-lead"
+        self.tasks[:] = [task(ident, "Call " + ident, "waiting_review", review=True) for ident in ids]
+        self.transport.handlers.insert(0, (
+            lambda argv: argv[-2:] == ["list", "--json"],
+            lambda call: CmdResult(0, json.dumps(self.tasks), "fm-board: reconcile coverage: inventory"),
+        ))
+
+        def show(call):
+            ident = call["argv"][2]
+            if ident in failing:
+                return CmdResult(1, "", "boom")
+            origin = origins.get(ident)
+            body = "Ready." + ("\\nCaptain hold origin: " + origin if origin else "")
+            return CmdResult(0, show_text(ident, body=body))
+
+        self.transport.handlers.insert(0, (
+            lambda argv: len(argv) > 1 and argv[1] == "show" and "--full" in argv, show,
+        ))
+        self.transport.handlers.insert(0, (
+            lambda argv: len(argv) > 1 and argv[1] == "open",
+            lambda call: CmdResult(0, LIFE + "\n"),
+        ))
+        write_meta(
+            self.home, worker, project="/work/firstpane", herdr_session="lab",
+            herdr_workspace_id="w1", herdr_tab_id="w1:t1", herdr_pane_id="pane-a",
+            endpoint_task_id=worker, decision_keys=",".join(keys),
+        )
+        app = self.app()
+        app.handle_key("1")
+        app.session = "lab"
+        row = self.waiting_row(ident=worker)
+        app.projects = [{"key": "firstpane", "label": "firstpane", "agents": [row]}]
+        app.selection_key = row["key"]
+        self.reload_board(app)
+        return app
+
+    def test_a_foreign_origin_key_is_not_a_candidate_for_the_count_or_for_enter(self):
+        # Break: another worker's call still counts as a second candidate, so Enter refuses a call that is really linked.
+        worker = "alter-050-team-lead"
+        for ids, keys, origins, want, counted in (
+            ([worker, "call-a"], ["call-a"], {"call-a": "someone-else"}, worker, True),
+            (["call-a", "call-b"], ["call-a", "call-b"], {"call-a": "someone-else", "call-b": worker}, "call-b", True),
+            (["call-a", "call-b"], ["call-a", "call-b"], {"call-b": worker}, None, True),
+            (["call-a"], ["call-a"], {"call-a": "someone-else"}, None, False),
+            ([worker, "call-a"], ["call-a"], {"call-a": worker}, None, True),
+            (["call-a", "call-b"], ["call-a", "call-b"], {"call-a": worker, "call-b": None}, None, True),
+        ):
+            with self.subTest(ids=ids, keys=keys, origins=origins):
+                self.transport.handlers.clear()
+                app = self.linked_app(keys, origins, ids)
+                self.assertEqual("Agents \u26a0 1" in self.plain_tab(app), counted)
+                app.handle_key("enter")
+                if want is None:
+                    self.assertEqual(app.tab, "agents")
+                    self.assertEqual(app.status, "no linked Board task")
+                else:
+                    self.assertEqual(app.tab, "board")
+                    self.assertEqual(app.board_selected, want)
+
+    def test_an_unreadable_origin_is_not_a_link_until_a_later_read_succeeds(self):
+        # Break: a failed show is treated as an unrecorded origin and the call is counted or opened unverified.
+        app = self.linked_app(["call-a"], {}, ["call-a"], failing=("call-a",))
+        self.assertNotIn("\u26a0", self.plain_tab(app))
+        app.handle_key("enter")
+        self.assertEqual(app.status, "no linked Board task")
+        self.transport.handlers.insert(0, (
+            lambda argv: len(argv) > 1 and argv[1] == "show" and "--full" in argv,
+            lambda call: CmdResult(0, show_text("call-a", body="Ready.")),
+        ))
+        self.reload_board(app)
+        self.assertIn("Agents \u26a0 1", self.plain_tab(app))
+        app.handle_key("enter")
+        self.assertEqual(app.board_selected, "call-a")
+
+    def test_origins_are_read_off_the_ui_path_and_reused_until_the_task_changes(self):
+        # Break: every frame or Enter shells out to show, or a changed hold keeps its old origin.
+        app = self.linked_app(["call-a"], {"call-a": "alter-050-team-lead"}, ["call-a"])
+        reads = lambda: len(self.named("fm-tasks-axi.sh", "show"))
+        self.assertEqual(reads(), 1)
+        for _ in range(3):
+            app.render()
+        self.assertEqual(reads(), 1)
+        app.handle_key("enter")
+        app.render()
+        opened = reads()
+        app.handle_key("esc")
+        self.reload_board(app)
+        self.assertEqual(reads(), opened)
+        self.tasks[0]["updated_at"] = "2026-10-29T09:00:00Z"
+        self.reload_board(app)
+        self.assertEqual(reads(), opened + 1)
+
     def test_enter_on_a_waiting_agent_opens_its_linked_task_and_esc_returns(self):
         # Break: Enter stays on Agents, opens a different task, clears the warning, or Esc lands in Board lanes.
         self.tasks[:] = [
@@ -453,12 +562,6 @@ class DetailFixture(BadgeFixture):
 
         self.transport.handlers.insert(0, (open_pred, open_fn))
         self.transport.handlers.insert(0, (show_pred, lambda call: CmdResult(0, text, "")))
-
-    def named(self, script, sub):
-        return [
-            call for call in self.transport.calls
-            if os.path.basename(call["argv"][0]) == script and len(call["argv"]) > 1 and call["argv"][1] == sub
-        ]
 
     def open_detail(self, app):
         app.handle_key("enter")
@@ -692,10 +795,85 @@ class ReplyTests(DetailFixture):
         self.assertIn("request changed", app.status)
         self.assertEqual(self.primary.received, [])
         self.assertEqual(app.composer.text, "approve the lanes")
-        app.handle_key("b")
+        app.handle_key("ctrl-y")
         self.assertEqual(app.screen, "confirm-send")
         self.assertIn("lifecycle " + LIFE_NEXT, app.pending["body"])
         self.assertEqual(self.primary.received, [])
+
+    def request_kinds(self, app):
+        return [item.get("kind") for item in app.draft["attachments"]]
+
+    def test_letters_after_a_refusal_are_text_and_never_rebind_or_drop_the_request(self):
+        # Break: typing b or p after a refusal rebinds the request or strips it and arms a send.
+        state = {"n": 0}
+
+        def open_code():
+            state["n"] += 1
+            return 0 if state["n"] == 1 else 1
+
+        app = self.ready(open_code=open_code)
+        self.type_send(app, "pls")
+        self.assertIn("resolved or released", app.status)
+        for char in " b p please":
+            app.handle_key(char)
+        self.assertEqual(app.screen, "tree")
+        self.assertEqual(app.composer.text, "pls b p please")
+        self.assertIn("board-request", self.request_kinds(app))
+        app.handle_key("ctrl-o")
+        self.assertEqual(app.screen, "tree")
+        self.assertIn("board-request", self.request_kinds(app))
+        self.assertEqual(self.primary.received, [])
+
+    def test_ctrl_o_sends_without_the_request_only_while_the_refusal_still_describes_the_draft(self):
+        # Break: the plain-send key survives an edit, Esc or a reopened draft, or never works.
+        state = {"n": 0}
+
+        def open_code():
+            state["n"] += 1
+            return 0 if state["n"] == 1 else 1
+
+        app = self.ready(open_code=open_code)
+        self.type_send(app, "go")
+        app.handle_key("esc")
+        self.assertIsNone(app.draft)
+        app.handle_key("tab")
+        app.handle_key("ctrl-o")
+        self.assertEqual(app.screen, "tree")
+        self.assertIn("board-request", self.request_kinds(app))
+        app.handle_key("enter")
+        self.assertIn("Ctrl-O", app.status)
+        app.handle_key("ctrl-o")
+        self.assertEqual(app.screen, "confirm-send", app.status)
+        self.assertNotIn("board-request", self.request_kinds(app))
+        self.assertEqual(app.composer.text, "go")
+        self.assertEqual(self.primary.received, [])
+
+    def test_ctrl_y_rebinds_only_before_the_text_changes_and_the_text_is_kept(self):
+        # Break: a stale rebind offer binds a request the Captain has not reviewed, or drops the typed text.
+        self.tasks[:] = [task("fp-ask-0001", "Summary", "waiting_review", review=True)]
+        self.install_reads()
+        self.identities = [LIFE, LIFE_NEXT, LIFE_NEXT, LIFE_NEXT]
+        self.primary = FakePi(self.transport, self.home)
+        app = self.board()
+        self.open_detail(app)
+        app.handle_key("tab")
+        self.type_send(app, "approve")
+        self.assertIn("Ctrl-Y", app.status)
+        for char in " b":
+            app.handle_key(char)
+        app.handle_key("ctrl-y")
+        self.assertEqual(app.screen, "tree")
+        request = next(item for item in app.draft["attachments"] if item.get("kind") == "board-request")
+        self.assertEqual(request["lifecycle"], LIFE)
+        self.assertEqual(app.composer.text, "approve b")
+        app.handle_key("enter")
+        self.assertIn("Ctrl-Y", app.status)
+        app.handle_key("esc")
+        app.handle_key("tab")
+        app.handle_key("ctrl-y")
+        self.assertEqual(app.screen, "tree")
+        request = next(item for item in app.draft["attachments"] if item.get("kind") == "board-request")
+        self.assertEqual(request["lifecycle"], LIFE)
 
     def test_closed_unknown_and_timeout_keep_the_text(self):
         # Break: a closed, unverifiable or timed-out request is still pasted as that request.

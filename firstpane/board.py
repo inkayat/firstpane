@@ -284,14 +284,15 @@ def hold_origin(body):
     return None
 
 
-def explicit_request_ids(meta, tasks, origins=None):
+def explicit_request_ids(meta, tasks, origins):
     """Current requests this meta explicitly owns.
 
     The meta's own id counts when it is a current request. A `decision_keys`
-    id counts when it is a different current request. An answered key is not
-    current, so it is absent. When `origins` has an entry, it must name this
-    meta; a different origin is not a link. A missing entry is an unrecorded
-    origin and is accepted. Names are not a link.
+    id counts when it is a different current request whose hold origin was
+    read (`origins` has an entry) and is this meta or unrecorded (None). An
+    unread origin is not verified, so it is not a link, and neither is a
+    different origin. An answered key is not current, so it is absent. Names
+    are not a link.
     """
     pending = set(pending_request_ids(tasks))
     worker = (meta or {}).get("task_id")
@@ -301,18 +302,19 @@ def explicit_request_ids(meta, tasks, origins=None):
     for key in (meta or {}).get("decision_keys") or []:
         if key == worker or key in found or key not in pending:
             continue
-        if origins is not None and key in origins and origins[key] not in (None, "", worker):
+        if key not in origins or origins[key] not in (None, "", worker):
             continue
         found.append(key)
     return found
 
 
-def waiting_agent_ids(tasks, agents, metas):
+def waiting_agent_ids(tasks, agents, metas, origins):
     """Pane ids of Waiting agents explicitly bound to a current user request.
 
     A binding is the existing one: exactly one meta for the agent's task, that
     meta's pane is the agent's pane, and no other meta claims that pane. The
-    request is that meta's own id, or a current id on its `decision_keys`.
+    request is that meta's own id, or a current id on its `decision_keys` whose
+    verified hold origin is not another worker.
     Several current calls are still one agent. Names, titles and paths are not
     a link. Idle, done and working rows are not a user wait. A request with no
     such agent is omitted; no row is invented.
@@ -335,7 +337,7 @@ def waiting_agent_ids(tasks, agents, metas):
         bound = by_task.get(task_id) or []
         if len(bound) != 1 or bound[0].get("herdr_pane_id") != pane_id or claims.get(pane_id) != 1:
             continue
-        if not explicit_request_ids(bound[0], tasks):
+        if not explicit_request_ids(bound[0], tasks, origins):
             continue
         seen.add(pane_id)
         found.append(pane_id)

@@ -26,6 +26,7 @@ from firstpane.sanitize import sanitize
 from firstpane.style import ACCENT, BG, BORDER, BRIGHT, FIELD_BG, INK, MUTED, PINK, SELECTED_BG, SEND_BG, YELLOW
 
 BOARD_CADENCE = 5
+ORIGIN_LOOKUPS = 6
 LIST_TIMEOUT = 20
 WIDE = 100
 TALL = 36
@@ -72,8 +73,10 @@ class BoardMixin:
         self.board_detail_anchor = None
         self.board_detail_force = False
         self.board_absent_at = None
-        self.board_rebind_offer = False
-        self.board_plain_offer = False
+        self.board_offer = None
+        self.board_metas = []
+        self.board_origin_cache = {}
+        self.board_origins = {}
         self.agents_board_return = None
 
     def _board_env(self):
@@ -107,7 +110,7 @@ class BoardMixin:
             self.clock(),
         )
         current = fresh and self.board_coverage
-        count = len(waiting_agent_ids(self.board_tasks, self._listed_agents(), load_metas(self.config.firstmate_home)))
+        count = len(waiting_agent_ids(self.board_tasks, self._listed_agents(), self.board_metas, self.board_origins))
         return badge_suffix("fresh" if current else "stale", count, narrow)
 
     def _refresh_board(self, force=False):
@@ -151,13 +154,61 @@ class BoardMixin:
         if tasks is None:
             return {"kind": "list", "error": "list returned no JSON", "stderr": result.stderr, "summary": summary}
         tasks = attach_projection(tasks, self._read_projection())
+        metas = load_metas(self.config.firstmate_home)
         return {
             "kind": "list",
             "tasks": tasks,
+            "metas": metas,
+            "origin_cache": self._read_origins(tasks, metas, self.board_origin_cache),
             "stderr": result.stderr,
             "summary": summary,
             "source": "list",
         }
+
+    def _read_origins(self, tasks, metas, known):
+        """Hold origins of the open calls the metas name as decision keys, read off the UI thread.
+
+        An entry is reused while the task's `updated_at` is unchanged. A call whose
+        read failed has no entry, so it is not a link until a later read succeeds.
+        """
+        pending = set(pending_request_ids(tasks))
+        stamps = {task.get("id"): task.get("updated_at") for task in tasks}
+        wanted = []
+        for meta in metas:
+            for key in meta.get("decision_keys") or []:
+                if key != meta.get("task_id") and key in pending and key not in wanted:
+                    wanted.append(key)
+        cache = {}
+        reads = 0
+        for key in wanted:
+            stamp = stamps.get(key)
+            held = known.get(key)
+            if held and stamp and held["stamp"] == stamp:
+                cache[key] = held
+                continue
+            if reads >= ORIGIN_LOOKUPS:
+                continue
+            reads += 1
+            result = self._origin_read(key)
+            if result is None:
+                continue
+            cache[key] = {"stamp": stamp, "origin": result[0]}
+        return cache
+
+    def _origin_read(self, request_id):
+        """`(origin,)` for the held task, origin None when it records none; None when it could not be read."""
+        if not TASK_ID_RE.fullmatch(request_id or ""):
+            return None
+        result = self.transport.run(
+            [os.path.join(self.config.firstmate_root, "bin", "fm-tasks-axi.sh"), "show", request_id, "--full"],
+            env=self._board_env(), timeout=SHOW_TIMEOUT, cwd=str(self.state_dir),
+        )
+        if result.timed_out or result.code != 0:
+            return None
+        parsed = parse_backlog_show(result.stdout, request_id)
+        if not parsed.get("found"):
+            return None
+        return (hold_origin((parsed.get("record") or {}).get("body")),)
 
     def _read_summary(self):
         path = Path(self.config.firstmate_home) / "state" / "home-summary.json"
@@ -209,6 +260,9 @@ class BoardMixin:
         self.board_error = None
         self.board_have_list = True
         self.board_tasks = result.get("tasks") or []
+        self.board_metas = result.get("metas") or []
+        self.board_origin_cache = result.get("origin_cache") or {}
+        self.board_origins = {key: held["origin"] for key, held in self.board_origin_cache.items()}
         self.board_source = result.get("source") or "list"
         self.board_generated_at = None
         self._after_list(snap, first)
@@ -390,6 +444,7 @@ class BoardMixin:
         others = [item for item in draft.get("attachments") or [] if item.get("kind") not in ("board", "board-request")]
         request = self._board_request_attachment(draft)
         draft["attachments"] = [record] + ([request] if request else []) + others
+        draft.pop("board_plain", None)
         self._stamp_board_request(draft)
         self._open_draft(draft)
 
@@ -871,22 +926,6 @@ class BoardMixin:
             rows.append((" " + _fg(clip(hint, self.cols - 2), MUTED, plain), {"kind": "board-composer", "part": "hint"}))
         return rows
 
-    def _origin_is_worker(self, request_id, worker):
-        """True when the held task's recorded origin is this worker, or unrecorded."""
-        if not TASK_ID_RE.fullmatch(request_id or ""):
-            return False
-        result = self.transport.run(
-            [os.path.join(self.config.firstmate_root, "bin", "fm-tasks-axi.sh"), "show", request_id, "--full"],
-            env=self._board_env(), timeout=SHOW_TIMEOUT, cwd=str(self.state_dir),
-        )
-        if result.timed_out or result.code != 0:
-            return False
-        parsed = parse_backlog_show(result.stdout, request_id)
-        if not parsed.get("found"):
-            return False
-        origin = hold_origin((parsed.get("record") or {}).get("body"))
-        return origin in (None, worker)
-
     def _linked_task_id(self, row):
         """The one current request a Waiting agent explicitly owns, or None."""
         if not row or row.get("status") != "blocked":
@@ -895,18 +934,13 @@ class BoardMixin:
         pane_id = row.get("pane_id")
         if not task_id or not pane_id:
             return None
-        metas = load_metas(self.config.firstmate_home)
+        metas = self.board_metas
         bound = [meta for meta in metas if meta.get("task_id") == task_id]
         claims = sum(1 for meta in metas if meta.get("herdr_pane_id") == pane_id)
         if len(bound) != 1 or bound[0].get("herdr_pane_id") != pane_id or claims != 1:
             return None
-        requests = explicit_request_ids(bound[0], self.board_tasks)
-        if len(requests) != 1:
-            return None
-        ident = requests[0]
-        if ident != task_id and not self._origin_is_worker(ident, task_id):
-            return None
-        return ident
+        requests = explicit_request_ids(bound[0], self.board_tasks, self.board_origins)
+        return requests[0] if len(requests) == 1 else None
 
     def _open_linked_board(self, row):
         task_id = self._linked_task_id(row)
@@ -965,10 +999,10 @@ class BoardMixin:
         if key in ("tab", "m"):
             self._open_board_composer()
             return True
-        if key == "b" and self.board_rebind_offer:
+        if key == "ctrl-y" and self._board_offer_is("rebind"):
             self._rebind_board_request()
             return True
-        if key == "p" and self.board_plain_offer:
+        if key == "ctrl-o" and self._board_offer_is("plain"):
             self._send_board_plain()
             return True
         if key == "enter" and self.board_selected:
@@ -1140,7 +1174,7 @@ class BoardMixin:
         return next((item for item in (draft or {}).get("attachments") or [] if item.get("kind") == "board-request"), None)
 
     def _stamp_board_request(self, draft):
-        if self.board_view != "detail" or draft is None:
+        if self.board_view != "detail" or draft is None or draft.get("board_plain"):
             return
         if self._board_request_attachment(draft):
             return
@@ -1403,9 +1437,34 @@ class BoardMixin:
             return None
         return (parsed.get("record") or {}).get("hold_reason") or ""
 
+    def _offer_board(self, kind):
+        card = self._board_card_id(str((self.draft or {}).get("target") or "")[len("board:"):])
+        self.board_offer = {
+            "kind": kind,
+            "target": (self.draft or {}).get("target"),
+            "body": self.composer.text,
+            "stamp": (card or {}).get("updated_at"),
+        }
+
+    def _board_offer_is(self, kind):
+        """True while the refusal that offered `kind` still describes this draft, text and request."""
+        offer = self.board_offer
+        if offer is None:
+            return False
+        card = self._board_card_id(str(offer["target"] or "")[len("board:"):])
+        live = (
+            offer["kind"] == kind
+            and self.draft is not None
+            and self.draft.get("target") == offer["target"]
+            and self.composer.text == offer["body"]
+            and (card or {}).get("updated_at") == offer["stamp"]
+        )
+        if not live:
+            self.board_offer = None
+        return live
+
     def _board_request_refusal(self):
-        self.board_rebind_offer = False
-        self.board_plain_offer = False
+        self.board_offer = None
         draft = self.draft or {}
         attached = self._board_request_attachment(draft)
         if attached is None:
@@ -1416,10 +1475,10 @@ class BoardMixin:
             return "wrong task; the draft stays here"
         opened = self._call_open(attached.get("id"))
         if opened.get("code") == 1:
-            self.board_plain_offer = True
-            return "This request was resolved or released. The draft stays here."
+            self._offer_board("plain")
+            return "This request was resolved or released. The draft stays here; Ctrl-O sends it without the request."
         if opened.get("code") != 0:
-            self.board_plain_offer = True
+            self._offer_board("plain")
             if opened.get("code") == 3:
                 return "Not in this FirstMate home's backlog; the draft stays here"
             reason = "Could not verify FirstMate's request"
@@ -1427,12 +1486,12 @@ class BoardMixin:
                 reason += " (timed out)"
             return reason + "; the draft stays here"
         if opened.get("lifecycle") != attached.get("lifecycle"):
-            self.board_rebind_offer = True
-            return "FirstMate's request changed since you wrote this; review the new request. Press b to bind to the current request."
+            self._offer_board("rebind")
+            return "FirstMate's request changed since you wrote this; review the new request. Press Ctrl-Y to bind to the current request."
         question = self._current_question(attached.get("id"))
         if question is None or question_sha256(question) != attached.get("question_sha256"):
-            self.board_rebind_offer = True
-            return "FirstMate's request changed since you wrote this; review the new request. Press b to bind to the current request."
+            self._offer_board("rebind")
+            return "FirstMate's request changed since you wrote this; review the new request. Press Ctrl-Y to bind to the current request."
         return None
 
     def _rebind_board_request(self):
@@ -1449,7 +1508,7 @@ class BoardMixin:
         attached["question"] = question
         attached["question_sha256"] = question_sha256(question)
         attached["home"] = self._board_home()
-        self.board_rebind_offer = False
+        self.board_offer = None
         self._save_draft()
         self._arm_send()
 
@@ -1459,7 +1518,8 @@ class BoardMixin:
         self.draft["attachments"] = [
             item for item in self.draft.get("attachments") or [] if item.get("kind") != "board-request"
         ]
-        self.board_plain_offer = False
+        self.draft["board_plain"] = True
+        self.board_offer = None
         self._arm_send()
 
     def _board_footer(self, plain):

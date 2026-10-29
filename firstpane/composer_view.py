@@ -198,6 +198,7 @@ class ComposerMixin:
         if self.tab == "review":
             self.review_focus = False
         self._close_inline()
+        self.board_offer = None
         self.draft = draft
         self.draft_conflict = False
         self.composer.set(draft.get("body") or "")
@@ -212,6 +213,7 @@ class ComposerMixin:
 
     def _drop_inline(self):
         self.draft = None
+        self.board_offer = None
         self.draft_conflict = False
         self.composer.set("")
         if self.focus == "composer":
@@ -287,10 +289,10 @@ class ComposerMixin:
 
     # ---- keys ------------------------------------------------------------------------
     def _composer_key(self, key):
-        if key == "b" and getattr(self, "board_rebind_offer", False) and str((self.draft or {}).get("target") or "").startswith("board:"):
+        if key == "ctrl-y" and hasattr(self, "_board_offer_is") and self._board_offer_is("rebind"):
             self._rebind_board_request()
             return
-        if key == "p" and getattr(self, "board_plain_offer", False) and str((self.draft or {}).get("target") or "").startswith("board:"):
+        if key == "ctrl-o" and hasattr(self, "_board_offer_is") and self._board_offer_is("plain"):
             self._send_board_plain()
             return
         if key in ("esc", "tab", "backtab"):
