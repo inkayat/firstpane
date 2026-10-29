@@ -240,6 +240,8 @@ class Transport(FakeTransport):
                 return CmdResult(0, f"HW-1\nHT-{len(self.osascript) + 1}\nGT-{len(self.osascript)}\n", "")
             (self.closed if "close (" in script else self.focused).append(args[0])
             return CmdResult(0, "", "")
+        if argv and os.path.basename(str(argv[0])) == "fm-board" and argv[-2:] == ["list", "--json"]:
+            return CmdResult(1, "", "list failed")
         if argv and argv[0] != "git":
             raise AssertionError("unexpected command " + str(argv[0]))
         return self.live.run(argv, stdin=stdin, env=env, timeout=timeout, cwd=cwd, detach=detach)

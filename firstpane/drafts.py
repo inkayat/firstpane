@@ -100,6 +100,21 @@ class DraftStore:
                 os.replace(temp, path)
         return True
 
+    def latest_finished(self, target):
+        """The newest finished draft for `target`, or None."""
+        if not self.directory.is_dir():
+            return None
+        found = []
+        for path in self.directory.glob("*.json"):
+            if path.name.startswith("open-") or path.name.startswith("."):
+                continue
+            data = self._read(path)
+            if data and data.get("target") == target and data.get("outcome") in FINISHED:
+                found.append(data)
+        if not found:
+            return None
+        return max(found, key=lambda item: (item.get("finished_at") or 0, item.get("revision") or 0))
+
     def archive(self, draft):
         """Close an attempted draft (unknown or saved-unannounced) without sending it again;
         it stays on disk under its id so `announce` can still find it."""

@@ -84,7 +84,8 @@ class PullRequestTabTests(InventoryFixture):
         self.assertEqual(self.gh_calls(), [])
         self.open_list(app)
         text = self.body(app)
-        order = [text.index(word) for word in ("alpha", "#11", "#12", "delta", "gamma", "#31")]
+        start = text.index("alpha")
+        order = [text.index(word, start) for word in ("alpha", "#11", "#12", "delta", "gamma", "#31")]
         self.assertEqual(order, sorted(order))
         self.assertNotIn("beta", text)
         self.assertNotIn("epsilon", text)
@@ -184,22 +185,25 @@ class PullRequestTabTests(InventoryFixture):
         app = self.app(submit=submit)
         app.refresh(manual=True)
         (app.handle_key("2"), None if app.review_source == "pr" else app.handle_key("\\"))
-        self.assertEqual(len(pending), 5)
+        fetches = [(fn, fut) for fn, fut in pending if getattr(fn, "__name__", "") != "_load_board"]
+        self.assertEqual(len(fetches), 5)
         text = self.body(app)
         self.assertIn("0 of 5 projects checked", text)
         self.assertNotIn("no open pull requests", text)
         self.assertNotIn("alpha", text)
         app.refresh(manual=True)
-        self.assertEqual(len(pending), 5)
-        fn, future = pending[0]
+        fetches = [(fn, fut) for fn, fut in pending if getattr(fn, "__name__", "") != "_load_board"]
+        self.assertEqual(len(fetches), 5)
+        fn, future = fetches[0]
         future.set_result(fn())
         text = self.body(app)
         self.assertIn("1 of 5 projects checked", text)
         self.assertIn("#11", text)
         app.handle_key("1")
         self.assertEqual(active_tab(app.render()), "Agents")
-        for fn, future in pending[1:]:
-            future.set_result(fn())
+        for fn, future in pending:
+            if not future.done():
+                future.set_result(fn())
         (app.handle_key("2"), None if app.review_source == "pr" else app.handle_key("\\"))
         self.assertNotIn("projects checked", self.body(app))
 
@@ -233,7 +237,7 @@ class PullRequestTabTests(InventoryFixture):
         colored = app.render()
         for name in ("alpha", "gamma"):
             self.assertRegex(colored, r"\x1b\[1;38;2;244;143;201m[\u25b8\u25be] %s" % name)
-        plain = self.app(env={"NO_COLOR": "1"})
+        plain = self.app(env={"NO_COLOR": "1", "PATH": self.fm_path})
         plain.refresh(manual=True)
         self.open_list(plain)
         frame = plain.render()
@@ -304,7 +308,7 @@ class PullRequestTabTests(InventoryFixture):
         app = self.app()
         app.refresh(manual=True)
         self.assertEqual(strip_sgr(app.render()).splitlines()[0].split(),
-                         ["Agents", "Review", "Board", "Terminal", "Browser", "Settings"])
+                         ["Agents", "?", "Review", "Board", "Terminal", "Browser", "Settings"])
         app.handle_key("5")
         self.assertEqual(active_tab(app.render()), "Browser")
         (app.handle_key("2"), None if app.review_source == "pr" else app.handle_key("\\"))
@@ -323,11 +327,11 @@ class PullRequestTabTests(InventoryFixture):
         app.cols = 50
         app.refresh(manual=True)
         first = strip_sgr(app.render()).splitlines()[0]
-        self.assertEqual(first.split(), ["Agents", "Rv", "Bd", "Tm", "Br", "Set"])
+        self.assertEqual(first.split(), ["Agents", "?", "Rv", "Bd", "Tm", "Br", "Set"])
         (app.handle_key("2"), None if app.review_source == "pr" else app.handle_key("\\"))
         frame = app.render()
         first = strip_sgr(frame).splitlines()[0]
-        self.assertEqual(first.split(), ["Ag", "Review", "Bd", "Tm", "Br", "Set"])
+        self.assertEqual(first.split(), ["Ag", "?", "Review", "Bd", "Tm", "Br", "Set"])
         self.assertTrue(all(len(strip_sgr(line)) <= 50 for line in frame.splitlines()))
 
 

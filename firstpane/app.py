@@ -33,10 +33,10 @@ from firstpane.sanitize import sanitize
 from firstpane.scope import path_in_scope, scope_root
 from firstpane.sessionname import session_from_socket_path
 from firstpane.settings_view import SettingsMixin, migrate_ui_state
-from firstpane.style import INK, MUTED, PINK, frame_lines, no_color, paint, rgb_fg
+from firstpane.style import INK, MUTED, PINK, YELLOW, frame_lines, no_color, paint, rgb_fg
 from firstpane.tabs import SETTINGS_KEY, SOURCE_KEY, TAB_LABELS, TAB_SHORT, TABS
 from firstpane.terminal_view import TerminalMixin
-from firstpane.workspace import FileEntry, parse_diff
+from firstpane.workspace import FileEntry, parse_diff, read_diff
 
 SNAPSHOT_TIMEOUT = 3
 CELL_QUERY = "\x1b[16t"
@@ -134,6 +134,9 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
         self.review_supervisor = None
         self.review_origin = None
         self.review_jumps = []
+        self.review_menu = None
+        self.review_focus = False
+        self._finding_goal = None
         self.revision_oid = None
         self.revision_parent = None
         self.settings_open = False
@@ -197,6 +200,8 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
             self.last_snapshot_at = now
         self._refresh_prs(force=manual)
         self._schedule_workspaces(force=manual)
+        if manual and self.tab == "board" and self.board_view == "detail":
+            self.board_detail_force = True
         self._refresh_board(force=manual and self.tab == "board")
         self._sync_draft()
         self._save_ui()
@@ -319,7 +324,15 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
             return
         if self.screen != "tree":
             return
-        if kind in ("changes-bar", "changes-menu", "diffline"):
+        if kind == "terminal":
+            if gesture == "press":
+                self._terminal_take_keyboard()
+            return
+        if kind in ("review-source", "review-menu"):
+            if gesture == "press":
+                self._review_frame_mouse(hit, column)
+            return
+        if kind in ("changes-bar", "changes-menu", "diffline", "diff-scroll"):
             self._changes_mouse(hit, column, gesture)
             return
         if gesture != "press":
@@ -328,7 +341,7 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
         if self.settings_open and kind in ("setting-choice", "setting-tab"):
             self._settings_mouse(hit)
             return
-        if self.tab == "board" and kind in ("board-filter", "board-done", "board-agent", "board-row", "board-card", "board-stop", "board-composer"):
+        if self.tab == "board" and kind in ("board-filter", "board-done", "board-agent", "board-row", "board-card", "board-stop", "board-composer", "board-back", "board-review"):
             if gesture == "press":
                 self._board_mouse(hit, column)
                 self._save_ui()
@@ -442,6 +455,10 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
             return self.tab == "review" and self.review_source == "pr"
         return self.tab == name
 
+    def _review_focused(self):
+        """Review is showing the diff without the agent header or the message composer."""
+        return bool(getattr(self, "review_focus", False)) and self.screen == "tree" and not self.settings_open and (self._on("changes") or self._on("prs"))
+
     def _set_review_source(self, source, record=True):
         """Switch Workspace / Pull Request without clearing the other source's position."""
         if source not in ("workspace", "pr") or source == self.review_source:
@@ -453,6 +470,7 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
         self.diff_view = self._parked_diff.get(source)
         self.changes_menu = None
         self.pr_menu = None
+        self.review_menu = None
         self._refresh_prs(force=False)
 
     def _review_revision(self):
@@ -502,10 +520,27 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
         if not selected_skills(self.review_skills, catalog):
             self.status = "select a skill first"
             return
-        command = " ".join(self.config.review.command)
+        names = ", ".join(Path(path).name for path in selected_skills(self.review_skills, catalog))
         self.pending = {"kind": "review"}
         self.screen = "confirm-review"
-        self.detail_text = f"Run review?\n{command}\ny starts it, any other key cancels"
+        self.detail_text = "\n".join([
+            "Run review?",
+            " ".join(self.config.review.command),
+            f"Scope: {self._review_scope_text()}",
+            f"Skills: {names}",
+            f"Times out after {self.config.review.timeout_seconds} s",
+            "y starts it, any other key cancels",
+        ])
+
+    def _uncommitted_patch(self, view):
+        """Every changed file of the chosen uncommitted scope as one patch, not just the open file."""
+        texts = []
+        for entry in self._change_entries():
+            text, error = read_diff(self.transport.run, view["workspace"], entry, self.env)
+            if error:
+                raise ValueError(f"cannot read {entry.path}: {error}")
+            texts.append(text if text.endswith("\n") or not text else text + "\n")
+        return "".join(texts)
 
     def _start_review(self):
         self.screen = "tree"
@@ -527,6 +562,7 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
                 pr_commit=self.pr_commit_oid,
             )
             catalog = skill_catalog(review.skills, view.get("workspace"))
+            patch = self._uncommitted_patch(view) if scope == "uncommitted" else view["patch"]
             request = build_request(
                 run_id=secrets.token_hex(16),
                 created_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.wall())),
@@ -534,8 +570,8 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
                 repository={"path": view.get("workspace"), "remote": None},
                 scope=scope,
                 revision=revision,
-                files=patch_files(view["patch"]),
-                patch_text=view["patch"],
+                files=patch_files(patch),
+                patch_text=patch,
             )
         except ValueError as exc:
             self.status = str(exc)
@@ -553,6 +589,7 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
         self.review_head = (request.get("revision") or {}).get("head") or (request.get("revision") or {}).get("commit")
         self.review_origin = self._review_origin()
         self.review_findings = []
+        self.review_blobs = {row["path"]: row.get("new_blob") for row in request["files"]}
         self.status = "review running"
         self.pending = None
 
@@ -566,6 +603,7 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
         if name != self.tab:
             self._close_inline()
             self.changes_menu = None
+            self.review_menu = None
             self.tab = name
             if self.focus in ("search", "browser"):
                 self.focus = "list"
@@ -605,6 +643,8 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
             elif key in ("j", "down", "k", "up"):
                 self._scroll(1 if key in ("j", "down") else -1)
             return
+        if self.tab == "review" and not self.settings_open and self._review_frame_key(key):
+            return
         if key == "esc":
             if self.settings_open:
                 self.settings_open = False
@@ -615,8 +655,11 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
             elif self.tab == "agents":
                 self._clear_agent_filters()
             elif self.tab == "board":
-                self.board_detail = False
-                self.board_search.set("")
+                if self.board_view == "detail":
+                    if not self._return_agents_board():
+                        self.board_view = "lanes"
+                else:
+                    self.board_search.set("")
             return
         if key == SETTINGS_KEY:
             if self.settings_open:
@@ -672,7 +715,12 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
             if rows[index]["kind"] == "agent":
                 self._select_target(rows[index], force=False)
         elif key == "enter" and rows:
-            self._activate(rows[index])
+            row = rows[index]
+            if self.tab == "agents" and row.get("kind") == "agent" and row.get("status") == "blocked":
+                self._select_target(row)
+                self._open_linked_board(row)
+            else:
+                self._activate(row)
         elif key == "g" and rows:
             if rows[index]["kind"] == "agent":
                 self._focus(rows[index])
@@ -697,14 +745,16 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
         mode = "full" if rows >= 14 else ("medium" if rows >= 8 else "small")
         separator = (paint("\u2500" * self.cols, rgb_fg(MUTED), plain), None)
         top = [(self._tab_row(plain), {"kind": "tabs", "key": ("tabs",)})]
-        if mode == "full" and self._on("prs"):
-            top.append((self._header_lines(plain, False)[0], None))
-            if self._current_pr() is None:
-                top.append(separator)
-        elif mode == "full" and not self.settings_open:
-            top += [(line, None) for line in self._header_lines(plain, True)] + [separator]
-        elif mode == "medium" and not self.settings_open:
-            top.append((self._header_lines(plain, False)[0], None))
+        # Focus mode keeps the tab row and spends the agent header's rows on the diff.
+        if not self._review_focused():
+            if mode == "full" and self._on("prs"):
+                top.append((self._header_lines(plain, False)[0], None))
+                if self._current_pr() is None:
+                    top.append(separator)
+            elif mode == "full" and not self.settings_open:
+                top += [(line, None) for line in self._header_lines(plain, True)] + [separator]
+            elif mode == "medium" and not self.settings_open:
+                top.append((self._header_lines(plain, False)[0], None))
         while len(top) >= rows and len(top) > 1:
             top.pop()
         footer = self._context_footer(plain) if self.screen == "tree" else []
@@ -724,7 +774,6 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
         return frame_lines([fit(line, self.cols) for line in lines[:rows]], self.cols, plain)
 
     def _tab_row(self, plain):
-        count = self._changed_count()
         visible = self._visible_tabs()
         narrow = self.cols < 60 or sum(len(TAB_LABELS[name]) + 2 for name in visible) + 4 > self.cols
         parts = []
@@ -732,12 +781,19 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
         column = 1
         for name in visible:
             label = TAB_LABELS[name] if name == self.tab or not narrow else TAB_SHORT[name]
-            if name == "review" and count is not None:
-                label += ("" if label == TAB_SHORT[name] else " ") + str(count)
+            badge = ""
+            urgent = False
+            if name == "agents":
+                badge, urgent = self._agents_badge(label == TAB_SHORT[name])
             shown = "1;4;" + rgb_fg(INK) if name == self.tab else rgb_fg(MUTED)
-            parts.append(paint(label, shown, plain))
-            spans.append((column, column + len(label), name))
-            column += len(label) + 2
+            painted = paint(label, shown, plain)
+            if badge:
+                badge_sgr = rgb_fg(YELLOW) if urgent else rgb_fg(MUTED)
+                painted += paint(badge, badge_sgr, plain)
+            parts.append(painted)
+            shown_width = width(label + badge)
+            spans.append((column, column + shown_width, name))
+            column += shown_width + 2
         left = " " + "  ".join(parts)
         gear = "Set" if narrow else "Settings"
         gap = max(1, self.cols - width(left) - len(gear))
@@ -764,14 +820,17 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
             return lines, [None] * len(lines)
         if self.settings_open:
             return self._settings_body(plain, budget)
-        if self._on("changes"):
-            return self._changes_body(plain, budget)
+        if self._on("changes") or self._on("prs"):
+            head = [self._review_source_row(plain)]
+            if self.review_menu is not None and self.focus == "list":
+                head += self._review_menu_rows(plain, max(1, budget - 6))
+            show = self._changes_body if self._on("changes") else self._prs_body
+            lines, hits = show(plain, max(1, budget - len(head)))
+            return [text for text, _ in head] + list(lines), [hit for _, hit in head] + list(hits)
         if self.tab == "browser":
             return self._browser_body(plain, budget)
         if self.tab == "terminal":
             return self._terminal_body(plain, budget)
-        if self._on("prs"):
-            return self._prs_body(plain, budget)
         return [""], [None]
 
     def _tree_lines(self, rows, budget, lines, hits, plain):
@@ -1485,6 +1544,8 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
         self._poll_capture()
         self._poll_pr_details()
         self._poll_board()
+        self._poll_origins()
+        self._poll_board_detail()
         self._poll_review()
         if hasattr(self, "_terminal_pump"):
             self._terminal_pump()
@@ -1647,8 +1708,9 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
         self.screen = "detail"
         self.pr_selection_key = row["key"]
 
-    def _open_pr_review(self, pr):
-        """The PR's whole diff, or the pinned PR commit's, in the shared diff viewport."""
+    def _open_pr_review(self, pr, path=None):
+        """The PR's whole diff, or the pinned PR commit's, in the shared diff viewport; with
+        `path`, the cursor starts on that file's first changed line."""
         head = (((self._pr_detail(pr) or {}).get("view")) or {}).get("head_oid")
         if not head:
             self.status = "PR head unknown: wait for the PR to load"
@@ -1677,7 +1739,7 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
             "pr": tuple(pr["key"]),
             "entry": FileEntry("pr", "P", f"PR #{pr['number']}" + (f" commit {commit[:7]}" if commit else "")),
             "lines": lines,
-            "cursor": next((index for index, line in enumerate(lines) if line.kind in "+-"), 0),
+            "cursor": next((index for index, line in enumerate(lines) if line.kind in "+-" and path in (None, kept[index][1])), 0),
             "mark": None,
             "top": 0,
             "xoff": 0,

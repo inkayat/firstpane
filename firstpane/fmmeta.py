@@ -22,6 +22,26 @@ def _field(text, key):
     return found[0]
 
 
+def _last(text, key):
+    """The last `key=` line, as the metadata writer reads an appended value."""
+    prefix = key + "="
+    found = [line[len(prefix):] for line in text.splitlines() if line.startswith(prefix)]
+    return found[-1] if found else None
+
+
+def decision_keys(text):
+    """Ids on the last `decision_keys=` line. An older line is not the inventory."""
+    raw = _last(text, "decision_keys")
+    if not raw:
+        return []
+    keys = []
+    for part in raw.split(","):
+        part = part.strip()
+        if part and part not in keys and " " not in part:
+            keys.append(part)
+    return keys
+
+
 def parse_meta(text, task_id):
     fields = {key: _field(text, key) for key in META_KEYS}
     if any(fields[key] is None for key in META_KEYS if key != "endpoint_task_id"):
@@ -35,10 +55,13 @@ def parse_meta(text, task_id):
             return None
     worktree = _field(text, "worktree")
     fields["worktree"] = worktree if worktree and worktree.startswith("/") else None
+    pr = _field(text, "pr")
+    fields["pr"] = pr if pr and pr.startswith("https://") and "/pull/" in pr else None
     for key in ("harness", "model", "effort"):
         value = (_field(text, key) or "").strip()
         fields[key] = value or None
     fields["task_id"] = task_id
+    fields["decision_keys"] = decision_keys(text)
     return fields
 
 

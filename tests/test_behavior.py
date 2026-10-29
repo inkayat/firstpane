@@ -19,6 +19,7 @@ from tests.support import (
     FakeTerminal,
     FakeTransport,
     agent_for,
+    fake_fm_path,
     gh_env_ok,
     note_json,
     pane,
@@ -178,6 +179,7 @@ class AppFixture(unittest.TestCase):
         self.tool = self.root / "fm-tool"
         (self.tool / "bin").mkdir(parents=True)
         (self.tool / "bin" / "fm-inbox.sh").write_text("#!/bin/sh\nexit 0\n")
+        self.fm_path = fake_fm_path(self.root)
         self.config = Config(
             firstmate_home=str(self.home),
             firstmate_root=str(self.tool),
@@ -192,7 +194,7 @@ class AppFixture(unittest.TestCase):
 
     def app(self, **kwargs):
         config = kwargs.pop("config", self.config)
-        env = kwargs.pop("env", {})
+        env = kwargs.pop("env", {"PATH": self.fm_path})
         state_dir = kwargs.pop("state_dir", self.state)
         return App(
             config=config,
@@ -329,7 +331,7 @@ class GroupingTests(AppFixture):
         colored = self.app()
         colored.refresh(manual=True)
         color_frame = colored.render()
-        plain = self.app(env={"NO_COLOR": "1"})
+        plain = self.app(env={"NO_COLOR": "1", "PATH": self.fm_path})
         plain.refresh(manual=True)
         plain_frame = plain.render()
         self.assertIn("\x1b[", color_frame)
@@ -668,7 +670,8 @@ class GroupingTests(AppFixture):
         app.refresh()
         self.assertEqual(self.methods().count("session.snapshot"), 2)
         self.assertEqual(self.gh_calls(), [])
-        self.assertNotIn("pr", " ".join(call["argv"][0] for call in self.transport.calls))
+        other = [call for call in self.transport.calls if not str(call["argv"][0]).endswith("fm-board")]
+        self.assertNotIn("pr", " ".join(call["argv"][0] for call in other))
         git_calls = [call for call in self.transport.calls if call["argv"][:1] == ["git"]]
         self.assertEqual(git_calls, [])
 
@@ -952,6 +955,7 @@ class PullRequestTests(AppFixture):
                             "isDraft": True,
                             "headRefName": "fm/alpha-task",
                             "baseRefName": "main",
+                            "headRefOid": "0123456789abcdef0123456789abcdef01234567",
                             "body": "SECRET_BODY\x1b]0;PWN\x07",
                             "reviewDecision": None,
                             "statusCheckRollup": None,
@@ -1402,27 +1406,30 @@ class PullRequestTests(AppFixture):
         app = self.app(submit=submit)
         self.expand_prs(app)
         self.assertEqual(self.gh_calls(), [])
-        self.assertEqual(len(pending), 1)
+        fetches = [(fn, fut) for fn, fut in pending if getattr(fn, "__name__", "") != "_load_board"]
+        self.assertEqual(len(fetches), 1)
         loading = strip_sgr(app.render())
         self.assertIn("loading", loading)
         self.assertNotIn("#3", loading)
         app.handle_key("k")
         app.refresh(manual=True)
-        self.assertEqual(len(pending), 1)
-        fn, future = pending[0]
+        fetches = [(fn, fut) for fn, fut in pending if getattr(fn, "__name__", "") != "_load_board"]
+        self.assertEqual(len(fetches), 1)
+        fn, future = fetches[0]
         future.set_result(fn())
         landed = strip_sgr(app.render())
         self.assertIn("#1 \u00b7 Title 1", landed)
         self.assertIn("loading pull request", landed)
         self.assertNotIn("projects checked", landed)
         self.assertEqual(len([call for call in self.gh_calls() if "list" in call["argv"]]), 1)
-        self.assertEqual(len(pending), 3)
-        fn, future = pending[1]
+        fetches = [(fn, fut) for fn, fut in pending if getattr(fn, "__name__", "") != "_load_board"]
+        self.assertEqual(len(fetches), 3)
+        fn, future = fetches[1]
         future.set_result(fn())
         facts = strip_sgr(app.render())
         self.assertNotIn("loading pull request", facts)
         self.assertIn("comments loading", facts)
-        fn, future = pending[2]
+        fn, future = fetches[2]
         future.set_result(fn())
         self.assertNotIn("loading", strip_sgr(app.render()))
 

@@ -17,7 +17,7 @@ from firstpane.config import Config
 from firstpane.drafts import DraftStore
 from firstpane.transport import LiveTransport
 from tests.gitfixture import GitFixture
-from tests.support import Clock, CmdResult, FakePi, FakeTerminal, FakeTransport, agent_for, note_json, pane, selected_line, snapshot, workspace, write_meta
+from tests.support import Clock, CmdResult, FakePi, FakeTerminal, FakeTransport, agent_for, fake_fm_path, note_json, pane, selected_line, snapshot, workspace, write_meta
 
 ADD = "[+] Add comment"
 
@@ -103,7 +103,7 @@ class PanelFixture(unittest.TestCase):
             config=self.config,
             transport=self.transport,
             state_dir=self.state,
-            env=env if env is not None else dict(self.fx.env),
+            env=env if env is not None else {**self.fx.env, "PATH": fake_fm_path(self.root)},
             clock=self.clock,
             terminal=FakeTerminal(),
             rows=rows,
@@ -258,6 +258,27 @@ class LayoutTests(PanelFixture):
             self.assertTrue(any("sığar mı" in line for line in lines), (rows, cols))
             self.assertTrue(any("- two" in line for line in lines), (rows, cols))
 
+    def test_review_tab_label_has_no_change_count_while_the_agent_row_keeps_it(self):
+        # Break: the top-level Review label shows the selected agent's changed-file count
+        # (a second copy of the number the agent's own row already shows), or removing it
+        # changes the tab order, the narrow labels or where a click on Review lands.
+        self.fx.write("one.txt", "1\n", root=self.wt_a)
+        self.fx.write("two.txt", "2\n", root=self.wt_a)
+        app = self.app()
+        self.select(app, "alpha-task")
+        lines = self.lines(app)
+        self.assertEqual(lines[0].split(), ["Agents", "?", "Review", "Board", "Terminal", "Browser", "Settings"])
+        self.assertNotIn("Review 2", lines[0])
+        alpha = next(line for line in lines if "Alpha task" in line)
+        self.assertRegex(alpha, r"Alpha task\s+Idle \u00b7 2 files")
+        app.rows, app.cols = 30, 50
+        self.assertEqual(self.lines(app)[0].split(), ["Agents", "?", "Rv", "Bd", "Tm", "Br", "Set"])
+        app.rows, app.cols = 30, 100
+        column = lines[0].index("Review") + 1
+        app.handle_bytes(f"\x1b[<0;{column};1M\x1b[<0;{column};1m".encode())
+        self.assertEqual(app.tab, "review")
+        self.assertEqual(self.lines(app)[0].split(), ["Agents", "?", "Review", "Board", "Terminal", "Browser", "Settings"])
+
     def test_header_shows_the_selected_agent_branch_status_and_changed_files(self):
         # Break: the header does not follow the selection, reads the primary checkout
         # instead of the agent worktree, or hides the changed-file count; the Agents rows show the
@@ -267,7 +288,6 @@ class LayoutTests(PanelFixture):
         app = self.app()
         self.select(app, "alpha-task")
         lines = plain(app.render()).splitlines()
-        self.assertIn("Review 2", lines[0])
         alpha = lines.index(next(line for line in lines if "Alpha task" in line))
         self.assertRegex(lines[alpha], r"Alpha task\s+Idle \u00b7 2 files\s+\u203a")
         beta = lines.index(next(line for line in lines if "Beta task" in line))
@@ -414,9 +434,9 @@ class ChangesTests(PanelFixture):
         self.open_changes(app)
         lines = self.lines(app)
         frame = "\n".join(lines)
-        self.assertIn("README.md \u25be", lines[4])
-        self.assertIn("1 / 2", lines[4])
-        self.assertIn("+2 -1  unstaged", lines[5])
+        self.assertIn("README.md \u25be", lines[5])
+        self.assertIn("1 / 2", lines[5])
+        self.assertIn("+2 -1  unstaged", lines[6])
         colored = app.render()
         self.assertIn("48;2;28;62;42", colored)
         self.assertTrue("48;2;72;30;42" in colored or "48;2;88;36;48" in colored)
@@ -449,20 +469,20 @@ class ChangesTests(PanelFixture):
         self.fx.git(self.wt_a, "add", "staged.txt")
         app = self.app()
         self.open_changes(app)
-        self.assertIn("1 / 3", self.lines(app)[4])
-        self.click_text(app, "All changes \u25be")
+        self.assertIn("1 / 3", self.lines(app)[5])
+        self.click_text(app, "Uncommitted \u25be")
         self.click_text(app, "Staged")
         lines = self.lines(app)
-        self.assertIn("staged.txt \u25be", lines[4])
-        self.assertIn("1 / 1", lines[4])
-        self.assertIn("Staged \u25be", lines[4])
+        self.assertIn("staged.txt \u25be", lines[5])
+        self.assertIn("1 / 1", lines[5])
+        self.assertIn("Uncommitted \u00b7 staged \u25be", lines[5])
         self.click_text(app, "Unstage file")
         self.assertIn("git restore --staged -- staged.txt", plain(app.render()))
         app.handle_key("n")
-        self.click_text(app, "Staged \u25be")
+        self.click_text(app, "Uncommitted \u00b7 staged \u25be")
         self.click_text(app, "All changes")
         self.pick_file(app, "new.txt")
-        self.assertIn("new.txt \u25be", self.lines(app)[4])
+        self.assertIn("new.txt \u25be", self.lines(app)[5])
         self.click_text(app, "Stage file")
         self.assertIn("git add -- new.txt", plain(app.render()))
         self.assertEqual(self.fx.git(self.wt_a, "diff", "--cached", "--name-only"), "staged.txt")
@@ -471,9 +491,9 @@ class ChangesTests(PanelFixture):
         self.clock.t += 20
         app.refresh(manual=True)
         lines = self.lines(app)
-        self.assertIn("new.txt \u25be", lines[4])
-        self.assertIn("staged", lines[5])
-        self.assertIn("Unstage file", lines[5])
+        self.assertIn("new.txt \u25be", lines[5])
+        self.assertIn("staged", lines[6])
+        self.assertIn("Unstage file", lines[6])
 
     def test_controls_stay_whole_and_clickable_in_narrow_panes(self):
         # Break: a narrow pane clips a control or a click lands on a neighbouring control.

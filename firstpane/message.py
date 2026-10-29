@@ -23,12 +23,25 @@ def _short(sha):
 
 def context_lines(context):
     if context and context.get("board_task"):
+        request = context.get("board_request")
         lines = [f"board task: {context['board_task']}"]
         if context.get("project"):
             lines.append(f"project: {context['project']}")
         if context.get("board_state"):
             lines.append(f"state: {context['board_state']}")
-        lines.append("not a dispatch; the task is context for this unsent message")
+        if request:
+            lines.append(f"firstmate home: {request.get('home') or ''}")
+            lines.append(
+                f"request: open captain call {request.get('id')} lifecycle {request.get('lifecycle')}"
+            )
+            asked = sanitize(request.get("question") or "")[:600]
+            asked_lines = asked.split("\n") or [""]
+            lines.append("asked: " + asked_lines[0])
+            lines.extend(asked_lines[1:])
+            lines.append(f"reply id: {context.get('reply_id') or ''}")
+            lines.append("this is the captain's reply to that request; it is recorded only when FirstMate records it")
+        else:
+            lines.append("not a dispatch; the task is context for this unsent message")
         return [sanitize(line) for line in lines]
     if not context or not context.get("agent"):
         return ["agent: none selected"]
@@ -93,8 +106,16 @@ def attachment_text(index, attachment):
             f"HEAD {_short(attachment.get('head'))}  {attachment.get('side')} blob {_short(attachment.get('blob'))}\n"
         )
         if attachment.get("source") or attachment.get("revision"):
-            head += f"source {attachment.get('source') or 'workspace'}  revision {attachment.get('revision') or 'uncommitted'}\n"
-        return head + _fence("\n".join(shown), "diff") + note
+            head += f"source {attachment.get('source') or 'workspace'}  revision {attachment.get('revision') or 'uncommitted'}"
+            head += f"  {sanitize(attachment['pr_url'])}\n" if attachment.get("pr_url") else "\n"
+        found = ""
+        for finding in attachment.get("findings") or []:
+            skill = f" ({sanitize(finding.get('skill'))})" if finding.get("skill") else ""
+            stale = f" [{sanitize(finding.get('stale'))}]" if finding.get("stale") else ""
+            found += f"review finding {sanitize(finding.get('severity'))}{skill}{stale}: {sanitize(finding.get('title'))}\n"
+            if finding.get("body"):
+                found += sanitize(finding["body"]) + "\n"
+        return head + found + _fence("\n".join(shown), "diff") + note
     if kind == "browser":
         title = sanitize(attachment.get("title") or "").replace("\n", " ")
         head = (
@@ -195,7 +216,9 @@ def build_message(context, user_text, attachments):
         parts.append("\n" + text + "\n")
     warnings = []
     size = sum(len(part.encode()) for part in parts)
-    for index, attachment in enumerate(attachments or [], 1):
+    # board-request is internal reply binding; its identity is already in the header
+    attachments = [item for item in attachments or [] if item.get("kind") != "board-request"]
+    for index, attachment in enumerate(attachments, 1):
         block = attachment_text(index, attachment)
         warnings.extend(scan_secrets(index, block))
         if size + len(block.encode()) + 1 > BODY_BYTES:

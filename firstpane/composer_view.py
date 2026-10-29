@@ -55,8 +55,10 @@ def anchor_key(record):
     """Identity of a selection: the same lines (or page selection) reopen the same draft."""
     if record.get("kind") == "diff":
         basis = ["diff", record.get("workspace"), record.get("group"), record.get("path"), record.get("rows")]
-        if record.get("group") == "commit":
+        if record.get("group") in ("commit", "pr"):
             basis.append(record.get("revision"))
+        if record.get("group") == "pr":
+            basis.append(record.get("pr_url"))
     elif record.get("kind") == "pr-thread":
         basis = ["pr-thread", record.get("slug"), record.get("number"), record.get("thread_id")]
     else:
@@ -192,7 +194,11 @@ class ComposerMixin:
         self._open_draft(draft)
 
     def _open_draft(self, draft):
+        # A comment needs the message area, so focus mode returns to the normal view.
+        if self.tab == "review":
+            self.review_focus = False
         self._close_inline()
+        self.board_offer = None
         self.draft = draft
         self.draft_conflict = False
         self.composer.set(draft.get("body") or "")
@@ -207,6 +213,7 @@ class ComposerMixin:
 
     def _drop_inline(self):
         self.draft = None
+        self.board_offer = None
         self.draft_conflict = False
         self.composer.set("")
         if self.focus == "composer":
@@ -217,6 +224,8 @@ class ComposerMixin:
             self.status = "draft conflict: not saved; Ctrl-R loads the other pane's draft"
             return False
         self.draft["body"] = self.composer.text
+        if str(self.draft.get("target") or "").startswith("board:") and hasattr(self, "_stamp_board_request"):
+            self._stamp_board_request(self.draft)
         if self.draft.get("revision", 0) == 0 and not self.draft["body"]:
             return True
         if self.drafts.save(self.draft):
@@ -280,10 +289,16 @@ class ComposerMixin:
 
     # ---- keys ------------------------------------------------------------------------
     def _composer_key(self, key):
+        if key == "ctrl-y" and hasattr(self, "_board_offer_is") and self._board_offer_is("rebind"):
+            self._rebind_board_request()
+            return
+        if key == "ctrl-o" and hasattr(self, "_board_offer_is") and self._board_offer_is("plain"):
+            self._send_board_plain()
+            return
         if key in ("esc", "tab", "backtab"):
             self._close_inline()
             return
-        if key == "enter":
+        if key in ("enter", "ctrl-enter"):
             self._arm_send()
             return
         if key == "ctrl-r":
@@ -331,11 +346,16 @@ class ComposerMixin:
         draft = self.draft or {}
         if str(draft.get("target") or "").startswith("board:"):
             record = next((item for item in draft.get("attachments") or [] if item.get("kind") == "board"), {})
-            return {
+            request = next((item for item in draft.get("attachments") or [] if item.get("kind") == "board-request"), None)
+            context = {
                 "board_task": record.get("id") or draft.get("target")[6:],
                 "project": record.get("project"),
                 "board_state": record.get("state"),
             }
+            if request:
+                context["board_request"] = request
+                context["reply_id"] = draft.get("request_id")
+            return context
         target = self.target
         if not target:
             return {}
@@ -379,6 +399,9 @@ class ComposerMixin:
                 continue
             if item.get("kind") != "diff":
                 continue
+            if item.get("group") == "pr":
+                warnings.extend(self._pr_diff_drift(index, item))
+                continue
             if ws is None or item.get("workspace") != ws.path:
                 warnings.append(f"attachment {index} was captured in {item.get('workspace')}; workspace is now {ws.path if ws and ws.path else 'unknown'}")
                 continue
@@ -396,6 +419,16 @@ class ComposerMixin:
                 )
         return warnings
 
+    def _pr_diff_drift(self, index, item):
+        """Warnings for lines taken from a pull request's diff: the PR left the list or its head moved."""
+        pr = next((row for row in self._all_prs() if row["number"] == item.get("number") and item.get("pr_url", "").endswith(f"/{row['owner']}/{row['repo']}/pull/{row['number']}")), None)
+        if pr is None:
+            return [f"attachment {index}: pull request #{item.get('number')} is not in the open PR list now"]
+        head = (((self._pr_detail(pr) or {}).get("view")) or {}).get("head_oid")
+        if head and item.get("head") and head != item["head"]:
+            return [f"attachment {index} was captured at PR head {item['head'][:7]}; the head is now {head[:7]}"]
+        return []
+
     def _arm_send(self):
         if self.draft_conflict:
             self.status = "draft conflict: Ctrl-R loads the other pane's draft"
@@ -404,6 +437,10 @@ class ComposerMixin:
             self.status = "nothing to send: write the message first"
             return
         self._save_draft()
+        refusal = self._board_request_refusal() if hasattr(self, "_board_request_refusal") else None
+        if refusal:
+            self.status = refusal
+            return
         handoff = Handoff(self.transport, self.config.firstmate_home)
         target, refusal = handoff.locate()
         refusal = refusal or handoff.check(target)
@@ -432,6 +469,12 @@ class ComposerMixin:
             self.pending = None
             self.status = "message not transferred: the draft changed"
             return
+        refusal = self._board_request_refusal() if hasattr(self, "_board_request_refusal") else None
+        if refusal:
+            self.screen = "tree"
+            self.pending = None
+            self.status = refusal
+            return
         self._refresh_target_now()
         body, warnings = build_message(self._message_context(), self.composer.text, self.draft.get("attachments"))
         warnings = warnings + self._drift_warnings()
@@ -447,6 +490,7 @@ class ComposerMixin:
             return
         self.draft["outcome"] = outcome
         self.draft["sent_body"] = body
+        self.draft["finished_at"] = self.clock()
         if not self.drafts.save(self.draft):
             self.drafts.archive(self.draft)
         if outcome == "transferred":
@@ -480,7 +524,7 @@ class ComposerMixin:
         kind = (draft.get("anchor") or {}).get("kind") if draft else None
         if self._on("changes") and kind == "diff":
             return draft
-        if self._on("prs") and kind == "pr-thread":
+        if self._on("prs") and kind in ("pr-thread", "diff"):
             return draft
         return None
 
@@ -491,6 +535,9 @@ class ComposerMixin:
         """Bottom composer for the open selection or conversation. Empty until one is added."""
         if not self._context_footer_active():
             return []
+        if self._review_focused():
+            bar = self._mode_bar(plain)
+            return [(bar, None)] if bar else []
         draft = self._open_context_draft()
         kind = (draft.get("anchor") or {}).get("kind") if draft else None
         title = "Write to FirstMate"
@@ -508,13 +555,37 @@ class ComposerMixin:
             shown = chip if width(chip) <= self.cols - 2 else tail(chip, self.cols - 2)
             text = " " + paint(shown, rgb_fg(INK) + ";" + rgb_bg(FIELD_BG), plain)
             rows.append((text, {"kind": "context-footer", "part": "chip", "dismiss": 1 + width(shown)}))
-        placeholder = "Select lines to write to FirstMate" if self._on("changes") else "Add a conversation to write to FirstMate"
+        placeholder = "Select lines to write to FirstMate" if self._on("changes") else "Add a conversation or select diff lines to write to FirstMate"
         rows.append(self._footer_field(draft, placeholder, plain))
         hint = "Enter previews for FirstMate's message box; it is not sent" if draft else "Enter on a selection adds it here"
         if draft and draft.get("outcome"):
             hint = f"last send: {draft['outcome']} \u00b7 " + hint
         rows.append((" " + paint(hint, rgb_fg(MUTED), plain), {"kind": "context-footer", "part": "hint"}))
+        bar = self._mode_bar(plain)
+        if bar:
+            rows.append((bar, None))
         return rows
+
+    def _mode_bar(self, plain):
+        """`NORMAL` or `VISUAL · n lines` while a diff is shown, then the diff keys."""
+        view = self.diff_view
+        shown = self._on("changes") or (self._on("prs") and self.pr_diff_open)
+        if not shown or not view or not view.get("lines"):
+            return ""
+        if self.focus == "composer":
+            mode, keys = "MESSAGE", "keys type text \u00b7 Esc leaves the message"
+            send = "Ctrl+Enter Preview, then y"
+        else:
+            if view.get("mark") is not None:
+                low, high = self._selection()
+                count = sum(1 for line in view["lines"][low : high + 1] if line.kind in "+- ")
+                mode = f"VISUAL \u00b7 {count} line" + ("" if count == 1 else "s")
+            else:
+                mode = "NORMAL"
+            keys = "h j k l Move \u00b7 w b Word \u00b7 v/V Select \u00b7 gd gI no symbol support \u00b7 Ctrl-O Back"
+            send = "Enter Write"
+        left = " " + paint(mode, "1;" + rgb_fg(ACCENT), plain) + "   " + paint(keys, rgb_fg(MUTED), plain)
+        return self._footer_spread(fit(left, max(1, self.cols - len(send) - 3)), paint(send + " ", rgb_fg(INK), plain))
 
     def _footer_spread(self, left, right):
         from firstpane.cells import spread

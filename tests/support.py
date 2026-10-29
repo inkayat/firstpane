@@ -1,6 +1,7 @@
 """Test utilities. Not part of the plugin."""
 
 import json
+import os
 import re
 import shutil
 from pathlib import Path
@@ -245,6 +246,17 @@ def note_json(outcome, note_id="n1", request_id="firstpane-deadbeef"):
 
 def strip_sgr(text):
     return re.sub(r"\x1b\[[0-9;]*m", "", text)
+
+
+def fake_fm_path(root):
+    """A PATH whose first entry holds an `fm` launcher with an `fm-board` sibling, so the Board
+    counts as configured whether or not the host has FirstMate installed."""
+    bin_dir = Path(root) / "fm-launcher-bin"
+    bin_dir.mkdir(exist_ok=True)
+    for name in ("fm", "fm-board"):
+        (bin_dir / name).write_text("#!/bin/sh\nexit 0\n")
+        (bin_dir / name).chmod(0o755)
+    return f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '/usr/bin:/bin')}"
 
 
 def ghostty_argv(command):

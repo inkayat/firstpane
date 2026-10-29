@@ -26,6 +26,7 @@ class TerminalControl:
         self.stdin = None
         self.closed_shell = False
         self._paste = None
+        self.ended = False
 
     def start(self, herdr, terminal_id, cols, rows, env, takeover=False):
         argv = [herdr or "herdr", "terminal", "session", "control", terminal_id, "--cols", str(cols), "--rows", str(rows)]
@@ -42,6 +43,7 @@ class TerminalControl:
         )
         self.stdin = self.child.stdin
         self.closed_shell = False
+        self.ended = False
         return argv
 
     def _send(self, payload):
@@ -81,20 +83,29 @@ class TerminalControl:
         self.input_bytes(data)
         return None
 
-    def read_frames(self):
-        """Non-blocking stdout lines already available. Returns applied frame count."""
+    def fileno(self):
         child = self.child
-        if child is None or child.stdout is None:
-            return 0
+        stdout = getattr(child, "stdout", None) if child is not None else None
+        return stdout.fileno() if stdout is not None else None
+
+    def read_available(self):
+        """Every byte the control has written so far, without blocking; b"" at end of stream
+        sets `ended`. Raw reads, so nothing waits in a read buffer the next select cannot see."""
         import select
-        ready, _, _ = select.select([child.stdout], [], [], 0)
-        if not ready:
-            return 0
-        chunk = child.stdout.readline()
-        if not chunk:
-            return 0
-        self._frames = getattr(self, "_frames", b"") + chunk
-        return 1
+        fd = self.fileno()
+        if fd is None:
+            return b""
+        chunks = []
+        while True:
+            ready, _, _ = select.select([fd], [], [], 0)
+            if not ready:
+                break
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                self.ended = True
+                break
+            chunks.append(chunk)
+        return b"".join(chunks)
 
     def release(self):
         """Detach. The shell keeps whatever the user had not sent."""
@@ -110,6 +121,12 @@ class TerminalControl:
             self.child.wait(1)
         except Exception:
             self.kill(self.child.pid, signal.SIGTERM)
+        stdout = getattr(self.child, "stdout", None)
+        if stdout is not None:
+            try:
+                stdout.close()
+            except OSError:
+                pass
         self.child = None
 
     def confirm_close(self):
@@ -117,6 +134,7 @@ class TerminalControl:
         self.closed_shell = True
 
 from firstpane.sanitize import sanitize
+from firstpane.style import BG, INK, MUTED, paint, rgb_bg, rgb_fg
 from firstpane.termframe import TermGrid
 
 CREATE_TIMEOUT = 3
@@ -199,6 +217,9 @@ class TerminalMixin:
         self._terminal_size = None
         self._terminal_book = None
         self._terminal_calls = []
+        self._terminal_pending = b""
+        self._terminal_halt = None
+        self._terminal_body_size = None
 
     def _terminal_book_for(self):
         if self._terminal_book is None:
@@ -215,13 +236,23 @@ class TerminalMixin:
             return None, workspace.reason or workspace.state
         return os.path.realpath(workspace.path), None
 
+    def _terminal_fds(self):
+        control = getattr(self, "terminal_control", None)
+        fd = control.fileno() if control is not None else None
+        return [] if fd is None else [fd]
+
     def _terminal_body(self, plain, budget):
+        """The shell's screen over every row but the last, which says how to type into it (or
+        why it cannot be shown). The shell is sized to exactly those rows."""
+        rows = max(2, budget - 1)
+        self._terminal_body_size = (max(2, self.cols), rows)
         directory, reason = self._terminal_directory()
         if reason:
             self._terminal_reset()
             self.terminal_status = f"Terminal unavailable: {reason}"
             return [self.terminal_status], [None]
-        record = self._terminal_book_for().find(directory)
+        book = self._terminal_book_for()
+        record = book.find(directory)
         agent_terminal = (self.target or {}).get("terminal_id")
         if agent_terminal_refused(record, agent_terminal):
             self._terminal_reset()
@@ -231,21 +262,58 @@ class TerminalMixin:
             self._terminal_reset()
             self.terminal_status = f"Creating the terminal may have succeeded; a Herdr tab '{record.get('label')}' may exist. n creates a new one."
             return [self.terminal_status], [None]
+        halt = self._terminal_halt
+        attached = getattr(self, "terminal_control", None) is not None and record is not None and self._terminal_attached == record.get("terminal_id")
+        if record is not None and record.get("state") == "ready" and not attached and not (halt and halt["terminal_id"] == record.get("terminal_id")):
+            record = self._terminal_prove(directory, record)
         if record is None and should_create(True, "ok", record):
             self._terminal_reset()
             self._terminal_create(directory)
-            record = self._terminal_book_for().find(directory)
-        if record and record.get("state") == "ready" and record.get("terminal_id"):
+            record = book.find(directory)
+        halt = self._terminal_halt
+        if record and halt and halt["terminal_id"] == record.get("terminal_id"):
+            self.terminal_status = halt["status"]
+        elif record and record.get("state") == "ready" and record.get("terminal_id"):
             if self.terminal_status != DESYNC:
                 self.terminal_status = ""
             self._terminal_attach(record)
             self._terminal_sync_size()
         else:
             self._terminal_reset()
-        lines = self.terminal_grid.rows(self.terminal_keyboard)[:budget]
+        base = None if plain else (rgb_fg(INK), rgb_bg(BG))
+        lines = self.terminal_grid.rows(self.terminal_keyboard, base)[:rows]
+        lines += [""] * (rows - len(lines))
         if self.terminal_status:
-            lines = [self.terminal_status] + lines
-        return (lines or [""])[:budget], [None] * budget
+            hint = self.terminal_status
+        elif self.terminal_keyboard:
+            hint = "Typing into the shell \u00b7 Ctrl-O gives the keyboard back to Firstpane"
+        else:
+            hint = "f, Enter or a click types into the shell \u00b7 x closes it"
+        hits = [{"kind": "terminal"}] * rows + [None]
+        return (lines + [paint(" " + hint, rgb_fg(MUTED), plain)])[:budget], hits[:budget]
+
+    def _terminal_prove(self, directory, record):
+        """The record when its terminal still exists (its pane id refreshed), else None after
+        dropping it. Unknown panes are never adopted; an unreachable Herdr keeps the record."""
+        book = self._terminal_book_for()
+        try:
+            info = self.transport.socket_call("pane.get", {"pane_id": record.get("pane_id")}, CREATE_TIMEOUT)
+        except Exception:
+            return record
+        pane = ((info or {}).get("result") or {}).get("pane") or {}
+        if pane.get("terminal_id") == record.get("terminal_id"):
+            return record
+        try:
+            response = self.transport.socket_call("session.snapshot", {}, CREATE_TIMEOUT)
+        except Exception:
+            return record
+        snapshot = ((response or {}).get("result") or {}).get("snapshot") or {}
+        panes = [row for row in snapshot.get("panes") or [] if isinstance(row, dict)]
+        found = next((row for row in panes if row.get("terminal_id") == record.get("terminal_id")), None)
+        if found is not None:
+            return book.note(directory, pane_id=found.get("pane_id"), tab_id=found.get("tab_id"))
+        book.drop(directory)
+        return None
 
     def _terminal_create(self, directory):
         """Create a shell in Firstpane's own workspace. Never focuses it and never retries a timeout."""
@@ -295,22 +363,25 @@ class TerminalMixin:
         )
         self.terminal_status = ""
 
-    def _terminal_attach(self, record):
+    def _terminal_attach(self, record, takeover=False):
         if getattr(self, "terminal_control", None) is not None:
             if self._terminal_attached == record["terminal_id"]:
                 return
             self._terminal_reset()
         popen = getattr(self, "terminal_popen", None) or subprocess.Popen
         herdr = os.environ.get("HERDR_BIN_PATH") or "herdr"
+        size = self._terminal_body_size or (max(2, self.cols), max(2, self.rows - 2))
         self.terminal_control = TerminalControl(popen)
-        self.terminal_control.start(herdr, record["terminal_id"], max(2, self.cols), max(2, self.rows - 2), self.env)
+        self.terminal_control.start(herdr, record["terminal_id"], size[0], size[1], self.env, takeover=takeover)
         self._terminal_attached = record["terminal_id"]
+        self._terminal_size = size
+        self._terminal_pending = b""
 
     def _terminal_sync_size(self):
         control = getattr(self, "terminal_control", None)
-        if control is None:
+        if control is None or self._terminal_body_size is None:
             return
-        size = (max(2, self.cols), max(2, self.rows - 2))
+        size = self._terminal_body_size
         if getattr(self, "_terminal_size", None) == size:
             return
         self._terminal_size = size
@@ -318,13 +389,17 @@ class TerminalMixin:
 
     def _terminal_pump(self):
         control = getattr(self, "terminal_control", None)
-        if control is None or not control.read_frames():
+        if control is None:
             return
-        raw = getattr(control, "_frames", b"")
-        control._frames = b""
-        for line in raw.splitlines():
+        *lines, self._terminal_pending = (self._terminal_pending + control.read_available()).split(b"\n")
+        for line in lines:
+            if not line.strip():
+                continue
             try:
                 payload = json.loads(line)
+                if payload.get("type") == "terminal.closed":
+                    self._terminal_closed(str(payload.get("reason") or "no reason given"))
+                    return
                 if payload.get("type") != "terminal.frame":
                     continue
                 data = base64.b64decode(payload.get("bytes") or "", validate=True)
@@ -337,6 +412,26 @@ class TerminalMixin:
                 self.terminal_status = DESYNC
             elif payload.get("full") and self.terminal_status == DESYNC:
                 self.terminal_status = ""
+        if control.ended:
+            self._terminal_closed("the terminal connection ended")
+
+    def _terminal_closed(self, reason):
+        """Herdr ended the control. A shell that is gone is forgotten (the next frame makes a new
+        one); otherwise the reason stays on screen and nothing reattaches until the user acts."""
+        terminal_id = self._terminal_attached
+        self._terminal_release()
+        reason = sanitize(reason)
+        if "not found" in reason:
+            directory, _ = self._terminal_directory()
+            if directory:
+                self._terminal_book_for().drop(directory)
+            self.terminal_grid = TermGrid()
+            self.terminal_status = ""
+            return
+        takeover = "already has an attached client" in reason or "taken over" in reason
+        status = "Terminal attached elsewhere \u00b7 t takes it over" if takeover else f"Terminal closed: {reason} \u00b7 reopen the tab to try again"
+        self._terminal_halt = {"terminal_id": terminal_id, "takeover": takeover, "status": status}
+        self.terminal_status = status
 
     def _terminal_release(self):
         control = getattr(self, "terminal_control", None)
@@ -344,11 +439,13 @@ class TerminalMixin:
             control.release()
             self.terminal_control = None
         self._terminal_attached = None
+        self._terminal_pending = b""
+        self._terminal_halt = None
         self.terminal_keyboard = False
 
     def _terminal_reset(self):
         """Detach and forget the last frame, so the next shell never shows this one's screen."""
-        if getattr(self, "terminal_control", None) is None and not self.terminal_grid.cells:
+        if getattr(self, "terminal_control", None) is None and not self.terminal_grid.cells and self._terminal_halt is None:
             return
         self._terminal_release()
         self.terminal_grid = TermGrid()
@@ -364,6 +461,10 @@ class TerminalMixin:
         if control.feed_keys(data) == "firstpane":
             self.terminal_keyboard = False
 
+    def _terminal_take_keyboard(self):
+        if getattr(self, "terminal_control", None) is not None:
+            self.terminal_keyboard = True
+
     def _terminal_key(self, key):
         if key == "n" and self.terminal_status.startswith("Creating"):
             directory, reason = self._terminal_directory()
@@ -371,11 +472,20 @@ class TerminalMixin:
                 self._terminal_book_for().drop(directory)
                 self._terminal_create(directory)
             return True
+        halt = self._terminal_halt
+        if key == "t" and halt and halt["takeover"]:
+            directory, _ = self._terminal_directory()
+            record = self._terminal_book_for().find(directory) if directory else None
+            self._terminal_halt = None
+            self.terminal_status = ""
+            if record and record.get("terminal_id") == halt["terminal_id"]:
+                self._terminal_attach(record, takeover=True)
+            return True
         if key == "x" and not self.terminal_keyboard:
             self._arm_terminal_close()
             return True
         if key in ("f", "enter") and not self.terminal_keyboard:
-            self.terminal_keyboard = True
+            self._terminal_take_keyboard()
             return True
         if key == "ctrl-o" and self.terminal_keyboard:
             self.terminal_keyboard = False
