@@ -33,7 +33,7 @@ from firstpane.sanitize import sanitize
 from firstpane.scope import path_in_scope, scope_root
 from firstpane.sessionname import session_from_socket_path
 from firstpane.settings_view import SettingsMixin, migrate_ui_state
-from firstpane.style import INK, MUTED, PINK, YELLOW, frame_lines, no_color, paint, rgb_fg
+from firstpane.style import INK, MUTED, YELLOW, frame_lines, no_color, paint, rgb_fg
 from firstpane.tabs import SETTINGS_KEY, SOURCE_KEY, TAB_LABELS, TAB_SHORT, TABS
 from firstpane.terminal_view import TerminalMixin
 from firstpane.workspace import FileEntry, parse_diff, read_diff
@@ -113,8 +113,6 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
         self.other_agents = []
         self.selection_key = None
         self.folded_projects = set()
-        self.folded_prs = set()
-        self.pr_selection_key = None
         self.hit_rows = []
         self.last_agent = {}
         self.last_snapshot_at = None
@@ -166,7 +164,6 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
         self.icons = HarnessIcons(clock, enabled=not no_color(env))
         self.pixel_mouse = None
         self.cell_known = False
-        self._body_budget = rows
         self._tab_spans = []
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.drafts = DraftStore(self.state_dir / "drafts")
@@ -356,11 +353,11 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
         if kind == "draft":
             self._open_target(hit["target"])
             return
-        if kind and kind.startswith("pr-") and kind != "pr-project":
+        if kind and kind.startswith("pr-"):
             self._pr_mouse(hit, column)
             self._save_ui()
             return
-        if kind not in ("project", "pr-project", "agent", "pr", "more", "other"):
+        if kind not in ("project", "agent", "other"):
             return
         matches = [item for item in self._rows() if item["key"] == hit["key"]]
         if len(matches) != 1:
@@ -833,47 +830,6 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
             return self._terminal_body(plain, budget)
         return [""], [None]
 
-    def _tree_lines(self, rows, budget, lines, hits, plain):
-        self._body_budget = max(1, budget)
-        index = self._selected_index(rows)
-        window, selected_at = self._window(rows, index)
-        lines.extend(self._paint_row(row, offset == selected_at, plain) for offset, row in enumerate(window))
-        hits.extend(window)
-        return lines, hits
-
-    def _tree_budget(self):
-        return self._body_budget
-
-    def _header_index(self, rows, index):
-        project_key = rows[index].get("project_key")
-        for candidate in range(index, -1, -1):
-            row = rows[candidate]
-            if row["kind"] == "pr-project" and row.get("project_key") == project_key:
-                return candidate
-        return index
-
-    def _window(self, rows, index):
-        budget = self._tree_budget()
-        if len(rows) <= budget:
-            return rows, index
-        header = self._header_index(rows, index)
-        if index == header or budget < 2:
-            start = min(max(0, index - budget + 1), max(0, len(rows) - budget))
-            window = rows[start : start + budget]
-            return window, index - start
-        after = rows[header + 1 :]
-        selected = index - header - 1
-        rest = budget - 1
-        start = min(max(0, selected - rest + 1), max(0, len(after) - rest))
-        chunk = after[start : start + rest]
-        return [rows[header]] + chunk, 1 + selected - start
-
-    def _paint_row(self, row, selected, plain):
-        marker = ">" if selected else " "
-        if row["kind"] == "pr-project":
-            return marker + paint(row["text"], "1;" + rgb_fg(PINK), plain)
-        return marker + "  " + row["text"]
-
     def _fit(self, text):
         return fit(text, self.cols)
 
@@ -895,10 +851,6 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
         common = self._common_dir(meta.get("worktree"))
         return bool(common) and _canonical(common) == _canonical(meta["project"])
 
-    def _pr_projects(self):
-        """Every project except a private clone shown on Agents only."""
-        return [project for project in self.projects if not project.get("agents_only")]
-
     def _generic_in_scope(self, agent, pane, workspaces):
         workspace = workspaces.get(agent.get("workspace_id")) or {}
         worktree = workspace.get("worktree") if isinstance(workspace.get("worktree"), dict) else None
@@ -908,7 +860,7 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
         return self._in_scope(cwd)
 
     def _rows(self):
-        return self._pr_rows() if self._on("prs") else self._agent_tree_rows()
+        return self._agent_tree_rows()
 
     def _agent_tree_rows(self):
         rows = []
@@ -932,26 +884,6 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
             rows.extend(others)
         return rows
 
-    def _pr_rows(self):
-        rows = []
-        for project in self._pr_projects():
-            state = self._pr_state(project)
-            if state not in ("prs", "error"):
-                continue
-            rows.append(self._pr_project_row(project, state))
-            if state == "prs" and project["key"] not in self.folded_prs:
-                rows.extend(project["pr_rows"])
-                if project.get("truncated"):
-                    rows.append(
-                        {
-                            "kind": "more",
-                            "key": ("more", project["key"]),
-                            "project_key": project["key"],
-                            "text": "+more",
-                        }
-                    )
-        return rows
-
     def _pr_state(self, project):
         """loading (never answered), error, skipped (no queryable GitHub remote), empty, or prs."""
         if project.get("fetched_at") is None:
@@ -963,9 +895,6 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
             return "skipped"
         return "prs" if project["pr_rows"] else "empty"
 
-    def _mark(self, open_):
-        return "\u25be" if open_ else "\u25b8"
-
     def _project_row(self, project, count):
         return {
             "kind": "project",
@@ -975,30 +904,11 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
             "agent_count": count,
         }
 
-    def _pr_project_row(self, project, state):
-        if state == "error":
-            text = "! " + project["label"] + "  " + project["pr_error"]
-        else:
-            text = self._mark(project["key"] not in self.folded_prs) + " " + project["label"]
-            choice = project.get("choice")
-            if choice and choice.notice:
-                text += "  " + choice.notice
-        return {
-            "kind": "pr-project",
-            "key": ("pr-project", project["key"]),
-            "project_key": project["key"],
-            "text": text,
-            "state": state,
-        }
-
     def _cursor(self):
-        return self.pr_selection_key if self._on("prs") else self.selection_key
+        return self.selection_key
 
     def _set_cursor(self, key):
-        if self._on("prs"):
-            self.pr_selection_key = key
-        else:
-            self.selection_key = key
+        self.selection_key = key
 
     def _selected_index(self, rows):
         if not rows:
@@ -1036,18 +946,6 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
                     self.selection_key = restored
             else:
                 self.folded_projects.add(key)
-            return
-        if row["kind"] == "pr-project":
-            key = row["project_key"]
-            if row["state"] == "error":
-                self._fetch_prs(self._project(key), force=True)
-            elif key in self.folded_prs:
-                self.folded_prs.remove(key)
-            else:
-                self.folded_prs.add(key)
-            return
-        if row["kind"] == "pr":
-            self._choose_pr(row)
             return
         if row["kind"] == "agent":
             self._select_target(row)
@@ -1690,7 +1588,6 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
             ]
         )
         self.screen = "detail"
-        self.pr_selection_key = row["key"]
 
     def _open_pr_review(self, pr, path=None):
         """The PR's whole diff, or the pinned PR commit's, in the shared diff viewport; with
@@ -1763,7 +1660,6 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
             text = text[:DIFF_CAP] + "\n[diff truncated]\n"
         self.detail_text = title + "\n" + text
         self.screen = "diff"
-        self.pr_selection_key = row["key"]
 
     def _arm_browser(self, row):
         pr = self._selected_pr(row)
@@ -2108,13 +2004,9 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
         if not isinstance(data, dict):
             return
         self.folded_projects = set(data.get("folded_projects") or [])
-        self.folded_prs = set(data.get("folded_prs") or [])
         selection = data.get("selection")
         if isinstance(selection, list):
             self.selection_key = tuple(selection)
-        pr_selection = data.get("pr_selection")
-        if isinstance(pr_selection, list):
-            self.pr_selection_key = tuple(pr_selection)
         pr_choice = data.get("pr_choice")
         if isinstance(pr_choice, list):
             self.pr_choice = tuple(pr_choice)
@@ -2157,9 +2049,7 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
             target["key"] = list(self.target["key"])
         payload = {
             "folded_projects": sorted(self.folded_projects),
-            "folded_prs": sorted(self.folded_prs),
             "selection": list(self.selection_key) if self.selection_key else None,
-            "pr_selection": list(self.pr_selection_key) if self.pr_selection_key else None,
             "pr_choice": list(self.pr_choice) if self.pr_choice else None,
             "pr_section": self.pr_section,
             "pr_resolved_open": self.pr_resolved_open,

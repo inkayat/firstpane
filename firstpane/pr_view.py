@@ -583,22 +583,6 @@ class PullRequestsMixin:
             self._drop_unrelated_pr_diff()
         return pr
 
-    def _choose_pr(self, row):
-        if self.pr_choice is None or tuple(self.pr_choice) != tuple(row["key"]):
-            self._close_inline()
-            self.pr_thread_id = None
-            self.pr_file_index = self.pr_check_index = 0
-            self.pr_expanded = set()
-            self.pr_commit_oid = None
-            self.pr_diff_open = False
-            self._parked_diff["pr"] = None
-            if self.review_source == "pr":
-                self.diff_view = None
-            self._pr_top = 0
-        self.pr_choice = tuple(row["key"])
-        self.pr_menu = None
-        self._fetch_pr_detail(row, force=False)
-
     # ---- reads -----------------------------------------------------------------------
     def _pr_detail(self, pr):
         return self.pr_details.get(tuple(pr["key"])) if pr else None
