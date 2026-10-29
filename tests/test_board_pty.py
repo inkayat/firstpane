@@ -109,7 +109,7 @@ class BoardPtyTests(unittest.TestCase):
         # Break: the real pane cannot show the classifier's columns, or keys 1-4 move.
         term = self.open(32, 120)
         term.wait_for(lambda screen: "Agents" in screen.text())
-        term.send(b"5")
+        term.send(b"3")
         term.wait_for(lambda screen: "Keyboard shortcuts" in screen.text() and "TODO" in screen.text())
         text = term.screen.text()
         self.assertIn("Working", text)
@@ -147,7 +147,7 @@ class BoardPtyTests(unittest.TestCase):
         # message, or the fixed message block.
         term = self.open(40, 130)
         term.wait_for(lambda screen: "Agents" in screen.text())
-        term.send(b"5")
+        term.send(b"3")
         term.wait_for(lambda screen: "fp-pty-todo \u00b7 Keyboard shortcuts" in screen.text())
         term.send(b"\x1b[C")
         term.wait_for(lambda screen: "fp-pty-work \u00b7 Herdr sidebar" in screen.text())
@@ -173,7 +173,7 @@ class BoardPtyTests(unittest.TestCase):
         term = self.open(32, 120)
         term.wait_for(lambda screen: "Agents" in screen.text())
         mark = len(term.raw)
-        term.send(b"5")
+        term.send(b"3")
         term.wait_for(lambda screen: "Keyboard shortcuts" in screen.text())
         painted = term.raw[mark:]
         self.assertNotRegex(painted, r"\x1b\[[0-9;]*(?:38|48);")

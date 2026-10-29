@@ -31,8 +31,9 @@ SECTIONS = ("files", "comments", "checks")
 SECTION_LABELS = {"files": "Files", "comments": "Comments", "checks": "Checks"}
 VIEW_FIELDS = (
     "number,title,state,isDraft,author,headRefName,baseRefName,headRefOid,additions,deletions,"
-    "changedFiles,files,reviewDecision,statusCheckRollup,updatedAt"
+    "changedFiles,files,reviewDecision,commits,reviews,comments,statusCheckRollup,updatedAt"
 )
+_RUN_URL = re.compile(r"/actions/runs/(\d+)(?:/|$)")
 THREAD_LIMIT = 100
 COMMENT_LIMIT = 50
 THREADS_QUERY = (
@@ -135,6 +136,35 @@ def _login(value):
     return sanitize(value.get("login") or "") if isinstance(value, dict) else ""
 
 
+def log_argv(details_url):
+    """`gh run view <id> --log-failed` for an Actions run URL, else None."""
+    match = _RUN_URL.search(details_url or "")
+    if not match:
+        return None
+    return ["gh", "run", "view", match.group(1), "--log-failed"]
+
+
+def parse_named(items, text_key, state=False):
+    """Commit, review, or issue-comment rows. None when gh did not return the field."""
+    if not isinstance(items, list):
+        return None
+    rows = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        oid = item.get("oid")
+        row = {"subject": sanitize(item.get(text_key) or "")}
+        author = _login(item.get("author"))
+        if author:
+            row["author"] = author
+        if isinstance(oid, str) and re.fullmatch(r"[0-9a-f]{7,64}", oid):
+            row["oid"] = oid
+        if state:
+            row["state"] = item.get("state") if isinstance(item.get("state"), str) else None
+        rows.append(row)
+    return rows
+
+
 def parse_checks(rollup):
     """[{state, name, workflow}] in gh's order, or None when gh did not report checks."""
     if not isinstance(rollup, list):
@@ -143,7 +173,8 @@ def parse_checks(rollup):
     for item in rollup:
         item = item if isinstance(item, dict) else {}
         name = sanitize(item.get("name") or item.get("context") or "unnamed check")
-        checks.append({"state": check_state(item), "name": name, "workflow": sanitize(item.get("workflowName") or "")})
+        url = item.get("detailsUrl") if isinstance(item.get("detailsUrl"), str) else None
+        checks.append({"state": check_state(item), "name": name, "workflow": sanitize(item.get("workflowName") or ""), "details_url": url})
     return checks
 
 
@@ -179,6 +210,10 @@ def parse_view(payload):
         "changed": _count(payload.get("changedFiles")),
         "files": files,
         "checks": parse_checks(payload.get("statusCheckRollup")),
+        "review_decision": review_label(payload["reviewDecision"]) if "reviewDecision" in payload else None,
+        "commits": parse_named(payload.get("commits"), "messageHeadline") if "commits" in payload else None,
+        "reviews": parse_named(payload.get("reviews"), "body", state=True) if "reviews" in payload else None,
+        "issue_comments": parse_named(payload.get("comments"), "body") if "comments" in payload else None,
     }
 
 
@@ -631,8 +666,8 @@ class PullRequestsMixin:
         if self.pr_picker or pr is None:
             return False
         detail = self._pr_detail(pr)
-        if key in ("tab", "right", "l", "backtab", "left", "h"):
-            step = -1 if key in ("backtab", "left", "h") else 1
+        if key in ("tab", "backtab"):
+            step = -1 if key == "backtab" else 1
             self._set_section(SECTIONS[(SECTIONS.index(self.pr_section) + step) % len(SECTIONS)])
         elif key in ("j", "down", "k", "up"):
             self._move(1 if key in ("j", "down") else -1)
@@ -662,7 +697,34 @@ class PullRequestsMixin:
                 self.status = "select an open conversation first"
         elif key == "a":
             self._announce()
+        elif key == "L" and self.pr_section == "checks":
+            self._show_check_log(pr, detail)
+        elif key == "C":
+            commits = ((detail or {}).get("view") or {}).get("commits") or []
+            if commits and commits[0].get("oid"):
+                self.pr_commit_oid = commits[0]["oid"]
+                self.status = f"review scope: PR commit {self.pr_commit_oid[:7]}"
+            else:
+                self.status = "no PR commit to pin"
+        elif key == "U":
+            self.pr_commit_oid = None
+            self.status = "review scope: PR head"
         return True
+
+    def _show_check_log(self, pr, detail):
+        checks = ((detail or {}).get("view") or {}).get("checks") or []
+        if not checks:
+            self.status = "no checks"
+            return
+        check = checks[min(self.pr_check_index, len(checks) - 1)]
+        argv = log_argv(check.get("details_url"))
+        if argv is None:
+            self.status = check.get("details_url") or "no Actions log for this check"
+            return
+        result = self.transport.run(argv, env=self._gh_env(), timeout=DETAIL_TIMEOUT, cwd=str(self.state_dir))
+        text = (result.stdout or result.stderr or "")[:200_000]
+        self.detail_text = f"Log {check.get('name')}\n" + (text or "no log output")
+        self.screen = "detail"
 
     def _pr_enter(self, pr, detail):
         if self.pr_section == "comments":
@@ -1022,6 +1084,15 @@ class PullRequestsMixin:
         view = (detail or {}).get("view")
         parts = []
         checks = view["checks"] if view else None
+        if view is None:
+            pass
+        else:
+            if view.get("review_decision"):
+                parts.append(paint(f"review {view['review_decision']}", MUTED_SGR, plain))
+            if view.get("commits") is not None:
+                parts.append(paint(f"{len(view['commits'])} commits", MUTED_SGR, plain))
+            if view.get("issue_comments") is not None:
+                parts.append(paint(f"{len(view['issue_comments'])} comments", MUTED_SGR, plain))
         if view is None:
             pass
         elif checks is None:

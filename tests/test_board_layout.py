@@ -38,7 +38,7 @@ class LayoutFixture(test_board.BoardFixture):
         if env:
             self.env.update(env)
         app = self.app(rows=rows, cols=cols)
-        app.handle_key("5")
+        app.handle_key("3")
         return app
 
     def lines(self, app):
@@ -220,7 +220,7 @@ class NavigationTests(LayoutFixture):
             self.assertTrue(all(width(line) <= cols for line in lines), (rows, cols))
             self.assertEqual(len(app.hit_rows), rows, (rows, cols))
         app.handle_key("1")
-        app.handle_key("5")
+        app.handle_key("3")
         self.assertEqual(app.tab, "board")
 
     def test_narrow_board_names_every_lane_and_a_click_on_one_switches_to_it(self):

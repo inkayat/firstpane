@@ -66,7 +66,7 @@ class InventoryFixture(AppFixture):
 
     def open_list(self, app):
         """The Pull Requests tab with its project-wide PR list (the PR selector) open."""
-        app.handle_key("4")
+        (app.handle_key("2"), None if app.review_source == "pr" else app.handle_key("\\"))
         app.handle_key("p")
 
     def listed_prs(self, app):
@@ -99,7 +99,7 @@ class PullRequestTabTests(InventoryFixture):
         self.listed["delta"] = None
         app = self.app()
         app.refresh(manual=True)
-        app.handle_key("4")
+        (app.handle_key("2"), None if app.review_source == "pr" else app.handle_key("\\"))
         self.assertIn("delta", self.body(app))
         self.assertIn("PRs unavailable: gh failed", self.body(app))
         self.assertNotIn("no open pull requests", self.body(app))
@@ -157,7 +157,7 @@ class PullRequestTabTests(InventoryFixture):
             self.listed[name] = []
         app = self.app()
         app.refresh(manual=True)
-        app.handle_key("4")
+        (app.handle_key("2"), None if app.review_source == "pr" else app.handle_key("\\"))
         text = self.body(app)
         self.assertIn("no open pull requests", text)
         self.assertIn("1 not queried", text)
@@ -183,7 +183,7 @@ class PullRequestTabTests(InventoryFixture):
 
         app = self.app(submit=submit)
         app.refresh(manual=True)
-        app.handle_key("4")
+        (app.handle_key("2"), None if app.review_source == "pr" else app.handle_key("\\"))
         self.assertEqual(len(pending), 5)
         text = self.body(app)
         self.assertIn("0 of 5 projects checked", text)
@@ -200,7 +200,7 @@ class PullRequestTabTests(InventoryFixture):
         self.assertEqual(active_tab(app.render()), "Agents")
         for fn, future in pending[1:]:
             future.set_result(fn())
-        app.handle_key("4")
+        (app.handle_key("2"), None if app.review_source == "pr" else app.handle_key("\\"))
         self.assertNotIn("projects checked", self.body(app))
 
     def test_gh_runs_only_while_the_tab_is_open_and_on_the_existing_cadence(self):
@@ -210,7 +210,7 @@ class PullRequestTabTests(InventoryFixture):
         self.clock.t += 500
         app.refresh()
         self.assertEqual(self.gh_calls(), [])
-        app.handle_key("4")
+        (app.handle_key("2"), None if app.review_source == "pr" else app.handle_key("\\"))
         self.assertEqual(len(self.list_calls()), 4)
         self.clock.t += 10
         app.refresh()
@@ -222,7 +222,7 @@ class PullRequestTabTests(InventoryFixture):
         self.clock.t += 500
         app.refresh()
         self.assertEqual(len(self.list_calls()), 8)
-        app.handle_key("4")
+        (app.handle_key("2"), None if app.review_source == "pr" else app.handle_key("\\"))
         self.assertEqual(len(self.list_calls()), 12)
 
     def test_project_headers_are_colored_from_the_palette_and_plain_without_color(self):
@@ -293,7 +293,8 @@ class PullRequestTabTests(InventoryFixture):
         before = len(self.list_calls())
         restarted = self.app()
         restarted.refresh(manual=True)
-        self.assertEqual(active_tab(restarted.render()), "Pull Requests")
+        self.assertEqual(active_tab(restarted.render()), "Review")
+        self.assertEqual(restarted.review_source, "pr")
         restarted.handle_key("p")
         self.assertEqual(self.listed_prs(restarted), [31])
         self.assertGreater(len(self.list_calls()), before)
@@ -303,16 +304,18 @@ class PullRequestTabTests(InventoryFixture):
         app = self.app()
         app.refresh(manual=True)
         self.assertEqual(strip_sgr(app.render()).splitlines()[0].split(),
-                         ["Agents", "Changes", "Browser", "Pull", "Requests", "Board", "Settings"])
-        app.handle_key("3")
+                         ["Agents", "Review", "Board", "Terminal", "Browser", "Settings"])
+        app.handle_key("5")
         self.assertEqual(active_tab(app.render()), "Browser")
-        app.handle_key("4")
-        self.assertEqual(active_tab(app.render()), "Pull Requests")
+        (app.handle_key("2"), None if app.review_source == "pr" else app.handle_key("\\"))
+        self.assertEqual(active_tab(app.render()), "Review")
+        self.assertEqual(app.review_source, "pr")
         app.handle_key("1")
         self.assertEqual(active_tab(app.render()), "Agents")
-        column = strip_sgr(app.render()).splitlines()[0].index("Pull Requests") + 3
+        column = strip_sgr(app.render()).splitlines()[0].index("Review") + 3
         app.handle_bytes(f"\x1b[<0;{column};1M")
-        self.assertEqual(active_tab(app.render()), "Pull Requests")
+        self.assertEqual(active_tab(app.render()), "Review")
+        self.assertEqual(app.review_source, "pr")
 
     def test_narrow_panes_keep_the_pull_requests_tab_reachable(self):
         # Break: the fourth tab overflows a narrow row or loses its short label.
@@ -320,11 +323,11 @@ class PullRequestTabTests(InventoryFixture):
         app.cols = 50
         app.refresh(manual=True)
         first = strip_sgr(app.render()).splitlines()[0]
-        self.assertEqual(first.split(), ["Agents", "Ch", "Br", "PR", "Bd", "Set"])
-        app.handle_key("4")
+        self.assertEqual(first.split(), ["Agents", "Rv", "Bd", "Tm", "Br", "Set"])
+        (app.handle_key("2"), None if app.review_source == "pr" else app.handle_key("\\"))
         frame = app.render()
         first = strip_sgr(frame).splitlines()[0]
-        self.assertEqual(first.split(), ["Ag", "Ch", "Br", "Pull", "Requests", "Bd", "Set"])
+        self.assertEqual(first.split(), ["Ag", "Review", "Bd", "Tm", "Br", "Set"])
         self.assertTrue(all(len(strip_sgr(line)) <= 50 for line in frame.splitlines()))
 
 
@@ -427,8 +430,9 @@ class TabNavigationTests(AgentContextFixture):
         self.select_line(app, "Beta task")
         app.handle_key("enter")
         target = dict(app.target)
-        app.handle_key("4")
-        self.assertEqual(active_tab(app.render()), "Pull Requests")
+        (app.handle_key("2"), None if app.review_source == "pr" else app.handle_key("\\"))
+        self.assertEqual(active_tab(app.render()), "Review")
+        self.assertEqual(app.review_source, "pr")
         for key in ("j", "j", "k", "k", "enter", "enter"):
             app.handle_key(key)
         self.assertEqual(app.target, target)
@@ -446,7 +450,8 @@ class TabNavigationTests(AgentContextFixture):
         app.refresh(manual=True)
         self.select_line(app, "Fm helper")
         app.handle_key("enter")
-        app.handle_key("4")
-        app.handle_key("2")
-        self.assertEqual(active_tab(app.render()).split()[0], "Changes")
+        (app.handle_key("2"), None if app.review_source == "pr" else app.handle_key("\\"))
+        app.handle_key("\\")
+        self.assertEqual(active_tab(app.render()).split()[0], "Review")
+        self.assertEqual(app.review_source, "workspace")
         self.assertIn("alpha / fm-helper", strip_sgr(app.render()).splitlines()[1])

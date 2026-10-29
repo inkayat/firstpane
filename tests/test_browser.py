@@ -58,9 +58,28 @@ if sys.argv[1:] == ["ls", "--all", "--json"]:
     sys.exit(0)
 if sys.argv[1:2] != ["open"]:
     sys.exit(2)
-helper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
+reader, writer = os.pipe()
+os.set_inheritable(reader, True)
+helper = subprocess.Popen(
+    [sys.executable, "-c", "import os,sys; os.read(int(sys.argv[1]), 1)", str(reader)],
+    pass_fds=(reader,), start_new_session=True,
+)
+os.close(reader)
+def reap(*_):
+    try:
+        os.close(writer)
+    except OSError:
+        pass
+    if helper.poll() is None:
+        helper.kill()
+    try:
+        helper.wait(2)
+    except Exception:
+        pass
+import atexit
+atexit.register(reap)
 def stop(*_):
-    helper.kill()
+    reap()
     os._exit(0)
 signal.signal(signal.SIGTERM, stop)
 url = sys.argv[2] if len(sys.argv) > 2 else "about:blank"
@@ -124,6 +143,7 @@ def grab_send(pick):
         status = urllib.request.build_opener(urllib.request.ProxyHandler({{}})).open(request, timeout=30).status
     except urllib.error.HTTPError as error:
         status = error.code
+        error.close()
     log("bridge.jsonl", {{"status": status}})
 pick = os.path.join(home, "grab.json")
 while True:
@@ -154,6 +174,40 @@ def alive(pid):
         return done == 0
     except ChildProcessError:
         return True
+
+
+class FakeBrowserChildTests(unittest.TestCase):
+    def test_helper_dies_when_the_browser_process_is_killed(self):
+        # Break: the fake browser's helper keeps sleeping after the browser dies, and the suite
+        # reports that subprocess still running.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "home"
+            runtime = root / "runtime"
+            home.mkdir()
+            runtime.mkdir()
+            script = root / "terminal-browser"
+            script.write_text(FAKE_TB.format(python=sys.executable, port=9, frame=FRAME))
+            script.chmod(0o755)
+            proc = subprocess.Popen(
+                [sys.executable, str(script), "open", "about:blank"],
+                env={"HOME": str(home), "XDG_RUNTIME_DIR": str(runtime), "PATH": os.environ.get("PATH", "")},
+                start_new_session=True,
+            )
+            self.addCleanup(proc.kill)
+            launch = home / "launch.jsonl"
+            deadline = time.time() + 5
+            while time.time() < deadline and not launch.is_file():
+                time.sleep(0.02)
+            self.assertTrue(launch.is_file(), "fake browser did not record its helper")
+            helper = json.loads(launch.read_text().splitlines()[-1])["helper"]
+            self.assertTrue(alive(helper))
+            os.kill(proc.pid, signal.SIGKILL)
+            proc.wait(5)
+            deadline = time.time() + 3
+            while time.time() < deadline and alive(helper):
+                time.sleep(0.02)
+            self.assertFalse(alive(helper))
 
 
 class Transport(FakeTransport):
@@ -377,7 +431,7 @@ class BrowserTabTests(unittest.TestCase):
         """Select `task`, choose the Browser tab and wait until its browser runs; then go to
         `url` (default the fixture page) in it."""
         self.select(task)
-        self.app.handle_key("3")
+        self.app.handle_key("5")
         self.pump(self.running)
         self.navigate(url or self.URL)
 
@@ -390,8 +444,8 @@ class BrowserTabTests(unittest.TestCase):
         self.page.update(url=url, href=url)
 
     def choose(self, *keys):
-        """Settings (6): j/k to a placement, Enter chooses it."""
-        for key in ("6", *keys, "enter"):
+        """Settings (,): j/k to a placement, Enter chooses it."""
+        for key in (",", *keys, "enter"):
             self.app.handle_key(key)
 
     def choose_inside(self):
@@ -509,7 +563,7 @@ class BrowserTabTests(unittest.TestCase):
         home = self.profile_home()
         status = lambda text: lambda: setattr(self.app, "status", text)
         events = self.drive(6.0, {0.8: status("a refusal"), 1.8: status(""), 2.8: lambda: self.app.handle_key("1"),
-                                  3.8: lambda: self.app.handle_key("3"), 4.8: (self.tb / "stream").unlink})
+                                  3.8: lambda: self.app.handle_key("5"), 4.8: (self.tb / "stream").unlink})
         self.app.browser.shutdown(wait=1)
         names = [name for name in self.logged("shm.jsonl", home) if name]
         self.addCleanup(lambda: [shm_remove(name) for name in names])
@@ -550,7 +604,7 @@ class BrowserTabTests(unittest.TestCase):
         self.open_tab("alpha-task", URL_A)
         first = self.launch()
         self.choose_inside()
-        self.app.handle_key("3")
+        self.app.handle_key("5")
         self.pump(self.running)
         self.assertFalse(alive(first["pid"]))
         self.assertFalse(alive(first["helper"]))
@@ -559,7 +613,7 @@ class BrowserTabTests(unittest.TestCase):
         self.assertEqual(inside["argv"], ["open", URL_A])
         self.navigate(URL_B)
         self.choose_ghostty()
-        self.app.handle_key("3")
+        self.app.handle_key("5")
         self.pump(lambda: self.running() and self.launch()["pid"] != inside["pid"])
         self.assertFalse(alive(inside["pid"]))
         self.assertFalse(alive(inside["helper"]))
@@ -589,9 +643,9 @@ class BrowserTabTests(unittest.TestCase):
         self.app.terminal_queries()
         self.choose_inside()
         self.select("alpha-task")
-        self.app.handle_key("3")
+        self.app.handle_key("5")
         self.choose_ghostty()
-        self.app.handle_key("3")
+        self.app.handle_key("5")
         self.pump(self.running)
         self.app.handle_bytes(SHM_OK)
         self.pump(lambda: True, timeout=0.5)
@@ -604,7 +658,7 @@ class BrowserTabTests(unittest.TestCase):
         self.app.terminal_queries()
         self.choose_inside()
         self.select("alpha-task")
-        self.app.handle_key("3")
+        self.app.handle_key("5")
         self.assertIsNone(self.app.browser.child)
         self.assertIn("checking how frames reach this terminal", self.frame())
         self.app.handle_bytes(NOTHING_ACCEPTED)
@@ -623,7 +677,7 @@ class BrowserTabTests(unittest.TestCase):
         self.assertIn("closed (profile kept)", self.frame())
         self.assertFalse(alive(pid))
         self.assertEqual(self.image_rows(), [])
-        self.app.handle_key("3")
+        self.app.handle_key("5")
         self.pump(lambda: self.running() and self.launch()["pid"] != pid)
         self.assertEqual(self.launch()["argv"], ["open", URL_A])
 
@@ -635,7 +689,7 @@ class BrowserTabTests(unittest.TestCase):
         first = self.frame().splitlines()[0]
         self.app.handle_mouse(0, first.index("Browser") + 1, 1)
         self.app.handle_key("2")
-        self.app.handle_key("3")
+        self.app.handle_key("5")
         self.pump(lambda: True, timeout=0.5)
         self.assertEqual(self.launch()["pid"], pid)
         self.assertEqual(len(self.logged("launch.jsonl")), 1)
@@ -646,17 +700,17 @@ class BrowserTabTests(unittest.TestCase):
         # later), losing the page the user is on.
         self.open_tab("alpha-task")
         pid = self.launch()["pid"]
-        self.app.handle_key("6")
+        self.app.handle_key(",")
         row = next(i for i, line in enumerate(self.frame().splitlines(), 1) if "[x] Browser" in line)
         self.app.handle_mouse(0, self.frame().splitlines()[row - 1].index("[x]") + 1, row)
         self.assertNotIn("Browser", self.frame().splitlines()[0])
-        self.assertEqual(self.app.tab, "settings")
+        self.assertTrue(self.app.settings_open)
         self.pump(lambda: True, timeout=0.5)
         self.assertTrue(alive(pid))
         self.assertEqual(self.app.placed.state, "open")
         row = next(i for i, line in enumerate(self.frame().splitlines(), 1) if "[ ] Browser" in line)
         self.app.handle_mouse(0, self.frame().splitlines()[row - 1].index("[ ]") + 1, row)
-        self.app.handle_key("3")
+        self.app.handle_key("5")
         self.pump(lambda: True, timeout=0.5)
         self.assertEqual(self.launch()["pid"], pid)
         self.assertEqual(len(self.logged("launch.jsonl")), 1)
@@ -668,15 +722,15 @@ class BrowserTabTests(unittest.TestCase):
         self.choose_inside()
         self.open_tab("alpha-task")
         pid = self.launch()["pid"]
-        self.app.handle_key("6")
+        self.app.handle_key(",")
         row = next(i for i, line in enumerate(self.frame().splitlines(), 1) if "[x] Browser" in line)
         self.app.handle_mouse(0, self.frame().splitlines()[row - 1].index("[x]") + 1, row)
         self.pump(lambda: True, timeout=0.5)
-        self.assertEqual((self.app.tab, self.app.browser.child.pid), ("settings", pid))
+        self.assertEqual((self.app.settings_open, self.app.browser.child.pid), (True, pid))
         self.assertEqual(self.image_rows(), [])
         row = next(i for i, line in enumerate(self.frame().splitlines(), 1) if "[ ] Browser" in line)
         self.app.handle_mouse(0, self.frame().splitlines()[row - 1].index("[ ]") + 1, row)
-        self.app.handle_key("3")
+        self.app.handle_key("5")
         self.pump(lambda: bool(self.image_rows()))
         self.assertEqual(self.app.browser.child.pid, pid)
         self.assertEqual(len(self.logged("launch.jsonl")), 1)
@@ -690,7 +744,7 @@ class BrowserTabTests(unittest.TestCase):
 
     def test_without_a_selected_agent_the_tab_says_so_and_starts_nothing(self):
         # Break: with no agent selected the browser starts under no agent's profile.
-        self.app.handle_key("3")
+        self.app.handle_key("5")
         self.assertIn("select an agent", self.frame())
         self.assertEqual(self.transport.osascript, [])
 
@@ -699,7 +753,7 @@ class BrowserTabTests(unittest.TestCase):
         self.config.terminal_browser_root = None
         self.app = self.make_app(self.config)
         self.select("alpha-task")
-        self.app.handle_key("3")
+        self.app.handle_key("5")
         self.assertIn("not configured", self.frame())
         self.assertEqual(self.transport.osascript, [])
 
@@ -713,18 +767,18 @@ class BrowserTabTests(unittest.TestCase):
         alpha_home = self.profile_home()
         alpha = self.launch()
         self.select("beta-task")
-        self.app.handle_key("3")
+        self.app.handle_key("5")
         self.pump(lambda: self.profile_home() != alpha_home and self.running())
         self.assertFalse(alive(alpha["pid"]))
         self.assertFalse(alive(alpha["helper"]))
         self.assertEqual(self.launch()["argv"], ["open"])
         self.navigate(URL_B)
         self.select("alpha-task")
-        self.app.handle_key("3")
+        self.app.handle_key("5")
         self.pump(lambda: self.profile_home() == alpha_home and self.running() and self.launch()["pid"] != alpha["pid"])
         self.assertEqual(self.launch()["argv"], ["open", URL_A])
         self.select("beta-task")
-        self.app.handle_key("3")
+        self.app.handle_key("5")
         self.pump(lambda: self.profile_home() != alpha_home and self.running() and len(self.logged("launch.jsonl")) == 2)
         self.assertEqual(self.launch()["argv"], ["open", URL_B])
         self.assertEqual(self.stored_drafts(), [])
@@ -739,7 +793,7 @@ class BrowserTabTests(unittest.TestCase):
         self.app.render()
         self.assertTrue(alive(alpha["pid"]))
         self.assertEqual(self.launch(), alpha)
-        self.app.handle_key("3")
+        self.app.handle_key("5")
         self.pump(lambda: self.running() and (self.app.placed.owner() or {}).get("label") == "beta-task")
         self.assertIn("wt-b", self.app.placed.owner()["source"])
         self.assertFalse(alive(alpha["pid"]))
@@ -756,7 +810,7 @@ class BrowserTabTests(unittest.TestCase):
         while alive(pid) and time.time() < deadline:
             time.sleep(0.02)
         self.assertFalse(alive(pid))
-        self.app.handle_key("3")
+        self.app.handle_key("5")
         self.pump(lambda: self.running() and self.launch()["pid"] != pid)
         self.assertEqual(self.launch()["argv"], ["open", URL_A])
 
@@ -765,14 +819,14 @@ class BrowserTabTests(unittest.TestCase):
         self.open_tab("alpha-task")
         self.navigate(URL_A)
         self.select("beta-task")
-        self.app.handle_key("3")
+        self.app.handle_key("5")
         self.pump(self.running)
         self.navigate(URL_A)
         self.select("alpha-task")
-        self.app.handle_key("3")
+        self.app.handle_key("5")
         self.pump(lambda: self.running() and self.app.placed.owner()["label"] == "alpha-task")
         self.select("beta-task")
-        self.app.handle_key("3")
+        self.app.handle_key("5")
         self.assertIn("same address as alpha-task", self.frame())
 
     def test_a_worktree_change_gives_the_agent_a_new_browser(self):
@@ -784,7 +838,7 @@ class BrowserTabTests(unittest.TestCase):
         self.app.refresh(manual=True)
         self.app.handle_key("a")
         self.assertIn("refused", self.frame())
-        self.app.handle_key("3")
+        self.app.handle_key("5")
         self.pump(lambda: "wt-c" in (self.app.placed.owner() or {}).get("source", "") and self.running())
         self.assertEqual(self.launch()["argv"], ["open"])
 
@@ -987,7 +1041,7 @@ class BrowserTabTests(unittest.TestCase):
         self.app.handle_key("a")
         defer.clear()
         self.select("beta-task")
-        self.app.handle_key("3")
+        self.app.handle_key("5")
         future, fn = pending[0]
         self.finish(future, fn)
         self.app.poll()
@@ -1022,11 +1076,11 @@ class BrowserTabTests(unittest.TestCase):
         self.assertNotIn("keep this", self.frame())
         self.choose_inside()
         self.select("beta-task")
-        self.app.handle_key("3")
+        self.app.handle_key("5")
         self.app.handle_key("m")
         self.assertIsNone(self.app.draft)
         self.select("alpha-task")
-        self.app.handle_key("3")
+        self.app.handle_key("5")
         self.app.handle_key("m")
         self.assertEqual(self.app.draft["anchor"]["url"], self.URL)
         self.assertIn("keep this", self.frame())
@@ -1045,7 +1099,7 @@ class BrowserTabTests(unittest.TestCase):
         answered = []
         self.app.placed.answer_pick = lambda conn, taken: answered.append(taken)
         self.select("beta-task")
-        self.app.handle_key("3")
+        self.app.handle_key("5")
         future.set_result({"url": self.URL, "title": "T", "selection": ""})
         self.app._poll_capture()
         self.assertEqual(answered, [True])
@@ -1080,7 +1134,7 @@ class BrowserTabTests(unittest.TestCase):
     def test_the_browser_tab_has_no_footer_composer(self):
         # Break: the removed bottom message area comes back on the Browser tab.
         self.select("alpha-task")
-        self.app.handle_key("3")
+        self.app.handle_key("5")
         self.assertNotIn("write to FirstMate", self.frame())
 
 

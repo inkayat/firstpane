@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 STATUS_TIMEOUT = 5
 DIFF_TIMEOUT = 10
 DIFF_CAP = 400_000
+COMMIT_LIST_CAP = 50
+_OID = re.compile(r"^[0-9a-f]{7,64}$")
 _HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 _INERT = ["--literal-pathspecs", "-c", "core.fsmonitor=false", "-c", "core.quotepath=false"]
 
@@ -207,6 +209,32 @@ def resolve_workspace(run, env, project_key, recorded=None, herdr=None, cwd=None
     return Workspace("unknown", reason="workspace unknown")
 
 
+def commit_list_argv(path, remote="origin", remote_head=True):
+    """Commits on HEAD that are not on the remote default branch, capped at 50.
+
+    When `<remote>/HEAD` is missing, exclude every remote-tracking ref and say so in the menu.
+    """
+    exclude = [f"{remote}/HEAD"] if remote_head else ["--remotes"]
+    return git_argv(
+        path, "log", "-n", str(COMMIT_LIST_CAP), "--format=%H%x09%s", "HEAD", "--not", *exclude,
+    )
+
+
+def parse_commit_list(text):
+    rows = []
+    for line in (text or "").splitlines():
+        oid, _, subject = line.partition("\t")
+        if _OID.match(oid):
+            rows.append({"oid": oid, "subject": subject})
+    return rows
+
+
+def commit_diff_argv(path, oid):
+    if not isinstance(oid, str) or not _OID.match(oid):
+        raise ValueError("commit diff refused: not an oid")
+    return git_argv(path, "show", "--format=", "--no-color", "--no-ext-diff", "--no-textconv", oid)
+
+
 def diff_argv(path, entry):
     common = ["diff", "--no-color", "--no-ext-diff", "--no-textconv"]
     if entry.group == "untracked":
@@ -214,6 +242,18 @@ def diff_argv(path, entry):
     if entry.group == "staged":
         return git_argv(path, *common, "--cached", "-M", "--", *([entry.orig] if entry.orig else []), entry.path)
     return git_argv(path, *common, "--", entry.path)
+
+
+def read_commit_diff(run, path, oid, env, timeout=DIFF_TIMEOUT):
+    result = run(commit_diff_argv(path, oid), env=read_env(env), timeout=timeout, cwd=path)
+    if result.timed_out:
+        return "", "unavailable: git show timed out"
+    if result.code != 0:
+        return "", "unavailable: git show failed"
+    text = result.stdout or ""
+    if len(text) > DIFF_CAP:
+        text = text[:DIFF_CAP] + "\n[diff truncated]\n"
+    return text, ""
 
 
 def read_diff(run, path, entry, env, timeout=DIFF_TIMEOUT):

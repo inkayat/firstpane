@@ -209,8 +209,8 @@ class LayoutTests(PanelFixture):
             self.assertNotIn("48;5;", frame, key)
             self.assertRegex(frame.splitlines()[0], r"\x1b\[1;4")
             self.assertNotIn("\x1b", bare, key)
-            self.assertIn("Changes" if app.cols >= 60 else "Ch", plain(frame).splitlines()[0])
-            self.assertIn("Changes" if app.cols >= 60 else "Ch", bare.splitlines()[0])
+            self.assertIn("Review" if app.cols >= 60 else "Rv", plain(frame).splitlines()[0])
+            self.assertIn("Review" if app.cols >= 60 else "Rv", bare.splitlines()[0])
         app.rows, app.cols = 16, 32
         narrow = app.render()
         self.assertIn(surface, narrow)
@@ -226,7 +226,7 @@ class LayoutTests(PanelFixture):
             self.assertEqual(len(lines), rows, (rows, cols))
             self.assertTrue(all(len(line) <= cols for line in lines), (rows, cols))
             self.assertTrue(any("\u203a" in line for line in lines[-6:]), (rows, cols))
-            app.handle_key("3")
+            app.handle_key("5")
             lines = self.lines(app)
             self.assertFalse([line for line in lines if "\u203a" in line or "Write to FirstMate" in line], (rows, cols))
             app.handle_key("m")
@@ -267,7 +267,7 @@ class LayoutTests(PanelFixture):
         app = self.app()
         self.select(app, "alpha-task")
         lines = plain(app.render()).splitlines()
-        self.assertIn("Changes 2", lines[0])
+        self.assertIn("Review 2", lines[0])
         alpha = lines.index(next(line for line in lines if "Alpha task" in line))
         self.assertRegex(lines[alpha], r"Alpha task\s+Idle \u00b7 2 files\s+\u203a")
         beta = lines.index(next(line for line in lines if "Beta task" in line))
@@ -343,7 +343,8 @@ class CursorSelectionTests(PanelFixture):
         self.assertIn("/ beta-task", lines[1])
         self.assertIn("fm/beta-task", lines[1])
         self.assertIn("working \u00b7 1 file", lines[2])
-        self.assertIn("wt-b (fm)", lines[2])
+        self.assertIn("wt-b", lines[2])
+        self.assertNotIn("wt-a", lines[2])
         self.assertIn("beta-only.txt", frame)
         self.assertNotIn("alpha-only.txt", frame)
         app.handle_key("k")
@@ -514,6 +515,7 @@ class ChangesTests(PanelFixture):
             "Bu satırı kontrol et\n"
             "\n"
             f"[1] diff README.md  unstaged  new lines 2-2  HEAD {head[:12]}  new blob {blob[:12]}\n"
+            "source workspace  revision uncommitted\n"
             "```diff\n"
             "+TWO\n"
             "```\n"
@@ -551,6 +553,7 @@ class ChangesTests(PanelFixture):
             [self.expected_context()
              + "\nüç satır\n\n"
              f"[1] diff README.md  unstaged  old lines 2-3  new lines 2-3  HEAD {head[:12]}  new blob {blob[:12]}\n"
+             "source workspace  revision uncommitted\n"
              "```diff\n-two\n+TWO\n three\n```"],
         )
 

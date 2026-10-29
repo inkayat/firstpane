@@ -92,6 +92,8 @@ def attachment_text(index, attachment):
             f"[{index}] diff {sanitize(attachment.get('path'))}  {attachment.get('group')}  {_ranges(attachment)}  "
             f"HEAD {_short(attachment.get('head'))}  {attachment.get('side')} blob {_short(attachment.get('blob'))}\n"
         )
+        if attachment.get("source") or attachment.get("revision"):
+            head += f"source {attachment.get('source') or 'workspace'}  revision {attachment.get('revision') or 'uncommitted'}\n"
         return head + _fence("\n".join(shown), "diff") + note
     if kind == "browser":
         title = sanitize(attachment.get("title") or "").replace("\n", " ")

@@ -466,14 +466,14 @@ class ComposerMixin:
 
     def _context_footer_active(self):
         """Changes and Pull Requests pin their context composer when the pane can hold it."""
-        return self.screen == "tree" and self.tab in ("changes", "prs") and self.rows >= 16
+        return self.screen == "tree" and (self._on("changes") or self._on("prs")) and self.rows >= 16
 
     def _open_context_draft(self):
         draft = self.draft
         kind = (draft.get("anchor") or {}).get("kind") if draft else None
-        if self.tab == "changes" and kind == "diff":
+        if self._on("changes") and kind == "diff":
             return draft
-        if self.tab == "prs" and kind == "pr-thread":
+        if self._on("prs") and kind == "pr-thread":
             return draft
         return None
 
@@ -492,14 +492,16 @@ class ComposerMixin:
         else:
             count = ""
         label = " " + paint(title, "1;" + rgb_fg(ACCENT), plain)
-        right = paint(count + " ", rgb_fg(MUTED), plain) if count else ""
+        right = paint("To: FirstMate ", rgb_fg(MUTED), plain)
+        if count:
+            right = paint(count + "  ", rgb_fg(MUTED), plain) + right
         rows = [(self._footer_spread(label, right), {"kind": "context-footer", "part": "label"})]
         if draft:
             chip = self._inline_label(draft) + " \u00d7"
             shown = chip if width(chip) <= self.cols - 2 else tail(chip, self.cols - 2)
             text = " " + paint(shown, rgb_fg(INK) + ";" + rgb_bg(FIELD_BG), plain)
             rows.append((text, {"kind": "context-footer", "part": "chip", "dismiss": 1 + width(shown)}))
-        placeholder = "Select lines to write to FirstMate" if self.tab == "changes" else "Add a conversation to write to FirstMate"
+        placeholder = "Select lines to write to FirstMate" if self._on("changes") else "Add a conversation to write to FirstMate"
         rows.append(self._footer_field(draft, placeholder, plain))
         hint = "Enter previews for FirstMate's message box; it is not sent" if draft else "Enter on a selection adds it here"
         if draft and draft.get("outcome"):
@@ -556,7 +558,7 @@ class ComposerMixin:
         self.status = self._footer_need()
 
     def _footer_need(self):
-        if self.tab == "changes":
+        if self._on("changes"):
             return "select diff lines to write about"
         return "add a conversation to write about"
 

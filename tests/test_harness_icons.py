@@ -260,7 +260,7 @@ class IconScreenTests(IconFixture):
         self.assertTrue(set(counts) <= {0, 2}, counts)
         visible = sum(1 for line in self.lines(app) if PLACEHOLDER in line)
         self.assertEqual(sum(counts), 2 * visible)
-        app.handle_key("3")
+        app.handle_key("5")
         self.assertEqual(sum(self.screen_after(app, terminal, screen)), 0)
         app.handle_key("1")
         counts = self.screen_after(app, terminal, screen)

@@ -4,6 +4,8 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from firstpane.review import parse_review_config
+
 
 @dataclass
 class Config:
@@ -17,6 +19,7 @@ class Config:
     socket_path: str | None = None
     herdr_pane_id: str | None = None
     terminal_browser_root: str | None = None
+    review: object | None = None
 
 
 def load_config(path, environ=None):
@@ -56,4 +59,5 @@ def load_config(path, environ=None):
         socket_path=environ.get("HERDR_SOCKET_PATH"),
         herdr_pane_id=environ.get("HERDR_PANE_ID"),
         terminal_browser_root=str(browser_root) if browser_root else None,
+        review=parse_review_config(data),
     )

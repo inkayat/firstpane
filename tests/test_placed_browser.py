@@ -464,6 +464,7 @@ class PlacedBrowserTests(unittest.TestCase):
                 results.append(urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request, timeout=10).status)
             except urllib.error.HTTPError as error:
                 results.append(error.code)
+                error.close()
 
         for auth in ("guess", token):
             thread = threading.Thread(target=post, args=(auth,))

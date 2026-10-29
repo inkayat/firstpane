@@ -126,7 +126,7 @@ class BoardFixture(unittest.TestCase):
         return app
 
     def open_board(self, app):
-        app.handle_key("5")
+        app.handle_key("3")
         return plain(app.render())
 
     def writers(self):
@@ -141,11 +141,11 @@ class BoardAppTests(BoardFixture):
         app.handle_key("1")
         self.assertEqual(app.tab, "agents")
         app.handle_key("2")
-        self.assertEqual(app.tab, "changes")
-        app.handle_key("3")
+        self.assertEqual(app.tab, "review")
+        app.handle_key("5")
         self.assertEqual(app.tab, "browser")
-        app.handle_key("4")
-        self.assertEqual(app.tab, "prs")
+        (app.handle_key("2"), None if app.review_source == "pr" else app.handle_key("\\"))
+        self.assertEqual((app.tab, app.review_source), ("review", "pr"))
         frame = self.open_board(app)
         self.assertEqual(app.tab, "board")
         self.assertIn("TODO", frame)
@@ -228,7 +228,7 @@ class BoardAppTests(BoardFixture):
         app.handle_bytes(b"look at this")
         app.handle_key("esc")
         app.handle_key("1")
-        app.handle_key("5")
+        app.handle_key("3")
         app.board_selected = "fp-keys-ab12"
         self.assertIn("look at this", plain(app.render()))
         self.assertEqual(self.writers(), [])
