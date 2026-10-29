@@ -1,6 +1,6 @@
 # Firstpane
 
-Firstpane is a [Herdr](https://herdr.dev) plugin that opens a terminal pane for watching the coding agents in your Herdr session. It groups the agents by project and shows each agent's changed files with numbered diffs, its pull request, a browser of its own, and, with [FirstMate](#firstmate-optional), a read-only task board. It is a regular split pane, not part of Herdr's native Agents or Spaces sidebar.
+Firstpane is a [Herdr](https://herdr.dev) plugin that opens a terminal pane for watching the coding agents in your Herdr session. It groups the agents by project and shows each agent's workspace changes and pull request in one Review tab with numbered diffs, a new shell in the agent's directory, a browser of its own, and, with [FirstMate](#firstmate-optional), a read-only task board. It is a regular split pane, not part of Herdr's native Agents or Spaces sidebar.
 
 Version **0.1.0** (`herdr-plugin.toml`). Source: [inkayat/firstpane](https://github.com/inkayat/firstpane); `v0.1.0` identifies the clean initial source snapshot, not a cross-platform installation test or a hosted release with binary assets. The original private development history is not part of this source distribution.
 
@@ -8,24 +8,24 @@ Version **0.1.0** (`herdr-plugin.toml`). Source: [inkayat/firstpane](https://git
 
 ![Agents tab: agents grouped by project, with status, changed files and harness icon](docs/images/agents.png)
 
-**Changes**: a numbered diff. Lines 7–8 are selected and attached to an unsent note to FirstMate.
+**Review**: a numbered diff (the screenshot predates the merge of the Changes and Pull Requests tabs into Review). Lines 7–8 are selected and attached to an unsent note to FirstMate.
 
-![Changes tab: a numbered diff with lines 7–8 selected and an unsent note to FirstMate about them](docs/images/changes.png)
+![Review tab (screenshot from the earlier Changes tab): a numbered diff with lines 7–8 selected and an unsent note to FirstMate about them](docs/images/changes.png)
 
 **Board**: FirstMate's tasks in TODO, Working, Waiting Review and Blocked lanes, read-only.
 
 ![Board tab: TODO, Working, Waiting Review and Blocked lanes from the FirstMate board](docs/images/board.png)
 
-<sub>These are real Firstpane 0.1.0 screens, drawn from demo data in an isolated Herdr session. The projects, tasks and agents are made up: each agent's status was reported to Herdr by hand, no model was running, and the board tasks were added by hand with `fm-board`. Model and effort show as `—` because none were recorded. Herdr's colored text snapshot of the pane was rendered to PNG, with the bundled harness icons drawn where a terminal shows them through kitty graphics. The message in the Changes screen is an unsent draft.</sub>
+<sub>These are real Firstpane 0.1.0 screens, drawn from demo data in an isolated Herdr session. The projects, tasks and agents are made up: each agent's status was reported to Herdr by hand, no model was running, and the board tasks were added by hand with `fm-board`. Model and effort show as `—` because none were recorded. Herdr's colored text snapshot of the pane was rendered to PNG, with the bundled harness icons drawn where a terminal shows them through kitty graphics. The message in the diff screen is an unsent draft.</sub>
 
 ## Features
 
 - **Agents**: the agents Herdr detects in your session, grouped by project. Task clones that Git shows were made from the same project are listed under one heading. Each row shows the title, status, changed-file count, harness icon, and the model and effort FirstMate recorded at launch. Search with `/` and filter by status with `f`. `g` focuses the agent's Herdr pane.
-- **Changes**: the selected agent's worktree, one file at a time, with old and new line numbers. Stage and unstage files. A Git menu offers commit, fetch, fast-forward pull and push. Select diff lines to write a note to FirstMate about them.
-- **Pull Requests**: the PR for the selected agent's branch, or any open PR in your projects. It has Files, Comments and Checks views. You can post a GitHub comment and resolve review conversations. It uses your logged-in `gh` CLI.
+- **Review**: the selected agent's worktree, one file at a time, with old and new line numbers, or a pull request: the PR for the agent's branch, or any open PR in your projects, with Files, Comments and Checks views and its full diff or one commit. Stage and unstage files. A Git menu offers commit, fetch, fast-forward pull and push. Select diff lines to write a note to FirstMate about them. You can post a GitHub comment and resolve review conversations (uses your logged-in `gh` CLI). If you configure a [`review` command](#configuration), you can run it on the diff and see its findings beside the lines.
+- **Terminal**: a new empty shell in the selected agent's directory.
 - **Board** (FirstMate only): a read-only view of FirstMate's task board, with TODO, Working, Waiting Review, Blocked and Done lanes. You cannot add, move or close tasks here.
 - **Browser**: the selected agent's own `terminal-browser`, either drawn inside Firstpane's Browser tab or opened in a new Ghostty tab (macOS). Each agent gets its own browser profile. Use the browser's select tool to write a note to FirstMate about part of a page.
-- **Settings**: where the browser opens (Ghostty tab or Inside Firstpane), and which tabs are shown. The choices are saved and kept across restarts.
+- **Settings** (header control, not a tab): where the browser opens (Ghostty tab or Inside Firstpane), and which tabs are shown. The choices are saved and kept across restarts.
 
 Every write needs a preview and `y`: Git operations, GitHub comments, resolving a conversation, and FirstMate messages. A click never performs one. Drafts are kept per agent.
 
@@ -36,9 +36,9 @@ Every write needs a preview and `y`: Git operations, GitHub comments, resolving 
 | OS / CPU | macOS or Linux, arm64 or x86_64. No Windows support. | The demo renders above were produced on macOS arm64 with Herdr 0.9.5. The existing CI workflow runs unit tests on Ubuntu with Python 3.11. |
 | Herdr | 0.9.0 or newer | Checked by the installer and by Herdr's plugin manifest. |
 | Python | 3.11 or newer. Standard library only. | Checked by the installer. macOS's own `/usr/bin/python3` (3.9.6 on the tested macOS 27.0.1) is refused; install Python 3.11+ and put it first on `PATH`. |
-| Git | yes (no minimum version is checked) | Required by the installer and the Changes tab. |
+| Git | yes (no minimum version is checked) | Required by the installer and the Review tab. |
 | Linux browser libraries | the shared libraries terminal-browser's Electron loads. Arch/Omarchy: `gtk3 nss alsa-lib mesa` | Checked by the installer with `ldd`. In a clean Arch Linux x86_64 container those four packages supplied every missing library. |
-| `gh` CLI | logged in to each GitHub host you use | Only the Pull Requests tab needs it. |
+| `gh` CLI | logged in to each GitHub host you use | Only the pull-request source of the Review tab needs it. |
 | Ghostty 1.3+ | only for the Ghostty-tab browser on macOS | — |
 
 The unit tests run on Ubuntu in CI. The installer was run end to end in a clean Arch Linux x86_64 Docker container (emulated on Apple silicon) where Git, Python, Herdr 0.9.5 and, for the successful runs, the browser libraries had been installed first: download, checksum, patch, Herdr link, config, rerun and upgrade. That is a terminal-only container, not Omarchy: a live Firstpane pane, Hyprland/Wayland, kitty graphics and the Electron browser have not been verified on Linux. On macOS 27.0.1 arm64 it was run in private test home directories with Git, Python 3.14 and Herdr 0.9.5 already installed: darwin-arm64 download, checksum, patch, Herdr link, config, rerun, upgrade and a rerun after Ctrl-C. No Firstpane pane or browser was started from that install, and an Intel Mac was not tested.
@@ -115,18 +115,17 @@ The toggle opens Firstpane beside the focused pane without moving focus. It clos
 Tab details:
 
 - **Agents**: moving the cursor onto an agent (`j` / `k` or arrows), `Enter` or a click makes it the selected agent, which the other tabs act on; a project heading keeps the agent selected before it. Moving does not focus a pane, open a browser or send anything. The cursor's first place when Firstpane starts, a search that hides rows, and unfolding a heading move the cursor without selecting; the footer then shows `Enter Select` on the highlighted agent until it is selected, and a project heading shows `Enter Fold`. `g` focuses its Herdr pane. Rows show model and effort only for agents FirstMate launched; otherwise they show `—`. Harness icons for pi, omp, Claude, Grok and Codex need a terminal that shows kitty graphics through Herdr. Without it, or with `NO_COLOR`, the harness is named in text. Icon sources are listed in `firstpane/icons/SOURCES.md`.
-- **Review**: one tab for the selected agent's workspace and for pull requests. `\` switches source and keeps the other source's place. In a diff, `h`/`l` scroll sideways, `w`/`b` move by word, `0`/`$` go to the ends, `v`/`V` select lines, and `gd`/`gI` say there is no symbol support. `G`, `gg` and switching source record a position, and `Ctrl-O` returns to it. On a pull request, `v` opens its diff in the same viewport, `C` picks one of its commits (newest first) and `U` goes back to the whole pull request; messages attach to the workspace diff only. `Tab` still opens the file list on a workspace diff and switches Pull Request sections. Messages stay an unsent FirstMate draft; the footer says `To: FirstMate`.
+- **Review**: one tab for the selected agent's workspace and for pull requests. `\` switches source and keeps the other source's place. In a diff, `h`/`l` scroll sideways, `w`/`b` move by word, `0`/`$` go to the ends, `v`/`V` select lines, and `gd`/`gI` say there is no symbol support. `G`, `gg` and switching source record a position, and `Ctrl-O` returns to it. On a pull request, `v` opens its diff in the same viewport, `C` picks one of its commits (newest first) and `U` goes back to the whole pull request; messages attach to the workspace diff only. `Tab` still opens the file list on a workspace diff and switches Pull Request sections. Messages stay an unsent FirstMate draft; the footer says `To: FirstMate`. With a `review` command configured, the Review menu (workspace diff and pull request) lists the configured skills and `Run review`: choose a usable skill, then confirm with `y`; Firstpane runs your command once, on request only, and shows its findings as markers on the diff. Without a command there is nothing to run.
 - **Terminal**: a new empty shell in the selected agent's directory. It does not attach to or focus the agent's terminal. `x` then `y` closes that shell.
-- **Settings**: `,` or the header Settings control. It is not a tab, and it stays reachable when tabs are hidden.
 - **Board**: `←` / `→` change lane, `↑` / `↓` change task, `Enter` shows details, `g` focuses the task's agent, `p` / `/` / `f` filter by project, search, and active tasks. A narrow pane shows one lane at a time.
 - **Browser**: opening the tab opens the selected agent's browser, or keeps it if it is already open. Only one agent's browser is open at a time. `x` closes it. `a` or `Ctrl-G` writes to FirstMate about the selected text on the page. The browser's select tool writes about the element you click. Inside Firstpane, the page fills the tab: `f`, `Enter` or a click on the page gives it the keyboard, and `Ctrl-O` gives it back to Firstpane. In a Ghostty tab, `f` or `Enter` brings that tab forward.
-- **Settings**: choose Ghostty tab or Inside Firstpane with `j` / `k` and `Enter`. An open browser moves the next time the Browser tab opens it. A Beside Firstpane choice saved by an earlier version becomes Inside Firstpane. A browser pane that version opened beside Firstpane is neither reused nor closed; close it in Herdr. Below that, every tab has a `[x]` / `[ ]` row; `Enter`, `Space` or a click shows or hides it. A hidden tab leaves the tab row and the number keys count again from 1 over the tabs left; its data, drafts and any browser it opened are kept, and showing it again brings it back as it was. Everything is shown until you hide it. Settings can be hidden too, but `6` then still opens it, so the other tabs can always be shown again. If every tab is hidden the tab row is empty and `6` is the way in. If the saved tab is hidden, Firstpane starts on the first shown tab, or on Settings when none is shown.
+- **Settings**: open it with `,` or the header Settings control. It is not a tab, so it is always reachable and has no number key. Choose Ghostty tab or Inside Firstpane with `j` / `k` and `Enter`. An open browser moves the next time the Browser tab opens it. A Beside Firstpane choice saved by an earlier version becomes Inside Firstpane. A browser pane that version opened beside Firstpane is neither reused nor closed; close it in Herdr. Below that, every tab has a `[x]` / `[ ]` row; `Enter`, `Space` or a click shows or hides it. A hidden tab leaves the tab row and the number keys count again from 1 over the tabs left; its data, drafts and any browser it opened are kept, and showing it again brings it back as it was. Everything is shown until you hide it. If every tab is hidden the tab row is empty and Settings is the way back. If the saved tab is hidden, Firstpane starts on the first shown tab. Tab choices saved by an earlier version carry over: Changes and Pull Requests become the two sources of Review, which is hidden only if both were hidden.
 
 ### FirstMate (optional)
 
 Without FirstMate, Firstpane lists Herdr-detected agents, shows changes, works with Git and pull requests, and opens browsers. With FirstMate configured, you also get the Board, model and effort on Agents rows, and messages:
 
-- **Messages are not sent by Firstpane.** On the preview, `y` pastes the message unsent into FirstMate's own message box, and you press `Enter` there. This applies to messages from Agents, Changes lines, Browser picks, PR conversations and Board tasks. It works only with a **pi** FirstMate that is idle, scrolled to the bottom, with an empty editor. Firstpane checks this at the preview and again at `y`, and never touches text already in the box. The status line says whether the message arrived: `in FirstMate's message box`, `not transferred: <reason>`, or `transfer unconfirmed`.
+- **Messages are not sent by Firstpane.** On the preview, `y` pastes the message unsent into FirstMate's own message box, and you press `Enter` there. This applies to messages from Agents, Review lines, Browser picks, PR conversations and Board tasks. It works only with a **pi** FirstMate that is idle, scrolled to the bottom, with an empty editor. Firstpane checks this at the preview and again at `y`, and never touches text already in the box. The status line says whether the message arrived: `in FirstMate's message box`, `not transferred: <reason>`, or `transfer unconfirmed`.
 - **PR notes** (`.` → Note to FirstMate) are different: they are queued through FirstMate's `fm-inbox.sh`, and `a` announces saved notes.
 
 ## Configuration
@@ -141,7 +140,12 @@ Run `herdr plugin config-dir firstpane` to find the configuration directory. Set
   "editor": ["vi"],
   "github_hosts": ["github.com"],
   "remotes": {"/absolute/project/path": "upstream"},
-  "terminal_browser_root": "/path/to/terminal-browser-0.13.4"
+  "terminal_browser_root": "/path/to/terminal-browser-0.13.4",
+  "review": {
+    "command": ["/path/to/review-tool", "--json"],
+    "skills": ["/path/outside/the/repo/skills/my-review"],
+    "timeout_seconds": 900
+  }
 }
 ```
 
@@ -155,6 +159,7 @@ Run `herdr plugin config-dir firstpane` to find the configuration directory. Set
 | `github_hosts` | GitHub hosts to query. Defaults to `["github.com"]`. |
 | `remotes` | Remote name per project path. Defaults to `origin`. |
 | `terminal_browser_root` | The unpacked terminal-browser 0.13.4 directory containing `bin/terminal-browser`. `PATH` is not searched. |
+| `review` | Optional. `command` is the review program as an argument list. There is no default, it is run without a shell, and `HERDR_*` variables are removed from its environment. It reads one `firstpane.review.request.v1` JSON document on stdin and writes one `firstpane.review.result.v1` document on stdout; the output is treated as untrusted. `skills` lists absolute skill directories (each with a `SKILL.md`). A skill inside the repository being reviewed is unusable, and Run review refuses until a usable skill is selected. `timeout_seconds` is 30–7200, default 900. Firstpane only starts the command when you ask; it does not review anything itself. |
 
 Once FirstMate or a project scope is configured, agents outside that scope are hidden. With neither, every agent Herdr detects is listed, but there is no default PR inventory beyond the agents' own projects.
 
@@ -165,9 +170,10 @@ Once FirstMate or a project scope is configured, agents outside that scope are h
 - **Browser**: Inside Firstpane can be slow, and that is not fixed. Page frames reach the pane as kitty graphics through Herdr. Firstpane passes at most about two page updates a second, whatever the transport, because a Herdr client that has fallen back to inline images (which Firstpane cannot see) queues every update ahead of your keys. Switching tabs, or a change of the page's size or rows, can wait up to a quarter second for the frames to go quiet, so that Herdr is less likely to drop its fast image path; this lowers the risk of the whole interface freezing but cannot undo a client that already fell back. The tab says when the terminal accepts neither shared-memory nor file frames. Inside Firstpane the browser belongs to Firstpane and closes with it. Cookies and page state are lost when a browser closes; the profile and the last address are kept. A Ghostty tab opens only when Ghostty is the front app and has a window. Firstpane does not start or check development servers: agents using the same address reach the same server.
 - **FirstMate messages**: only a pi FirstMate can receive them. A keystroke typed into FirstMate between Firstpane's last check and the paste can still land first. pi shows pastes longer than ten lines as `[paste #N +K lines]`.
 - **Board**: read-only, and it depends on `fm-board` sitting next to the `fm` launcher on `PATH`. Cards do not show PRs or checks.
+- **Review and Terminal**: `gd` and `gI` report that there is no symbol support. Review findings come only from the command you configure. Terminal always starts a new shell and never reuses the agent's own terminal. Neither has been verified against a real Herdr agent on screen.
 - **Agents**: model and effort are known only for agents launched by FirstMate. Icons need kitty graphics. The installer does not check for kitty graphics.
-- **Pull Requests**: requires `gh` to be logged in already. Shows up to 20 open PRs per project.
-- **Limits**: Git writes are never retried. A timeout is reported as an unknown outcome. Diffs are cut at 400 KB in Changes and 200 KB for PRs.
+- **Pull requests (Review tab)**: requires `gh` to be logged in already. Shows up to 20 open PRs per project.
+- **Limits**: Git writes are never retried. A timeout is reported as an unknown outcome. Diffs are cut at 400 KB for workspace changes and 200 KB for PRs.
 - **Installer**: no Windows support. It refuses a dirty checkout, a different `origin`, a foreign plugin link, and an existing `src.previous`.
 
 ## Development
