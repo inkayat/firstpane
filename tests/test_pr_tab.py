@@ -237,7 +237,7 @@ class PullRequestTabTests(InventoryFixture):
         colored = app.render()
         for name in ("alpha", "gamma"):
             self.assertRegex(colored, r"\x1b\[1;38;2;244;143;201m[\u25b8\u25be] %s" % name)
-        plain = self.app(env={"NO_COLOR": "1"})
+        plain = self.app(env={"NO_COLOR": "1", "PATH": self.fm_path})
         plain.refresh(manual=True)
         self.open_list(plain)
         frame = plain.render()

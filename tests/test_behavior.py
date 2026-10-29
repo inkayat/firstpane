@@ -19,6 +19,7 @@ from tests.support import (
     FakeTerminal,
     FakeTransport,
     agent_for,
+    fake_fm_path,
     gh_env_ok,
     note_json,
     pane,
@@ -178,6 +179,7 @@ class AppFixture(unittest.TestCase):
         self.tool = self.root / "fm-tool"
         (self.tool / "bin").mkdir(parents=True)
         (self.tool / "bin" / "fm-inbox.sh").write_text("#!/bin/sh\nexit 0\n")
+        self.fm_path = fake_fm_path(self.root)
         self.config = Config(
             firstmate_home=str(self.home),
             firstmate_root=str(self.tool),
@@ -192,7 +194,7 @@ class AppFixture(unittest.TestCase):
 
     def app(self, **kwargs):
         config = kwargs.pop("config", self.config)
-        env = kwargs.pop("env", {})
+        env = kwargs.pop("env", {"PATH": self.fm_path})
         state_dir = kwargs.pop("state_dir", self.state)
         return App(
             config=config,
@@ -329,7 +331,7 @@ class GroupingTests(AppFixture):
         colored = self.app()
         colored.refresh(manual=True)
         color_frame = colored.render()
-        plain = self.app(env={"NO_COLOR": "1"})
+        plain = self.app(env={"NO_COLOR": "1", "PATH": self.fm_path})
         plain.refresh(manual=True)
         plain_frame = plain.render()
         self.assertIn("\x1b[", color_frame)

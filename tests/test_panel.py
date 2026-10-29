@@ -17,7 +17,7 @@ from firstpane.config import Config
 from firstpane.drafts import DraftStore
 from firstpane.transport import LiveTransport
 from tests.gitfixture import GitFixture
-from tests.support import Clock, CmdResult, FakePi, FakeTerminal, FakeTransport, agent_for, note_json, pane, selected_line, snapshot, workspace, write_meta
+from tests.support import Clock, CmdResult, FakePi, FakeTerminal, FakeTransport, agent_for, fake_fm_path, note_json, pane, selected_line, snapshot, workspace, write_meta
 
 ADD = "[+] Add comment"
 
@@ -103,7 +103,7 @@ class PanelFixture(unittest.TestCase):
             config=self.config,
             transport=self.transport,
             state_dir=self.state,
-            env=env if env is not None else dict(self.fx.env),
+            env=env if env is not None else {**self.fx.env, "PATH": fake_fm_path(self.root)},
             clock=self.clock,
             terminal=FakeTerminal(),
             rows=rows,
