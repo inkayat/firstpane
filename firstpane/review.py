@@ -180,6 +180,9 @@ def _scan(patch_text):
             files[-1].update(status="renamed", old_path=_unquote(text[len("rename from ") :]))
         elif files and text.startswith("rename to "):
             files[-1]["path"] = _unquote(text[len("rename to ") :])
+        elif files and text.startswith("index ") and ".." in text:
+            old, _, new = text[len("index ") :].split(" ")[0].partition("..")
+            files[-1].update(old_blob=old or None, new_blob=new or None)
     paths = [None] * len(rows)
     for file, start, stop in zip(files, starts, starts[1:] + [len(rows)]):
         for index in range(start, stop):

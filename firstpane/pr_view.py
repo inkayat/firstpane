@@ -69,8 +69,7 @@ CHECK_ICONS = {"passing": ("\u2713", GREEN_SGR), "failing": ("\u2717", PINK_SGR)
 MENU = (
     ("open", "Open on GitHub", "o"),
     ("detail", "Description", ""),
-    ("diff", "Full diff", "d"),
-    ("review-diff", "Review diff", "v"),
+    ("review-diff", "Diff", "d"),
     ("commits", "Review a commit", "C"),
     ("comment", "Comment on GitHub", "c"),
     ("note", "Note to FirstMate", "m"),
@@ -698,8 +697,8 @@ class PullRequestsMixin:
             self._pr_enter(pr, detail)
         elif key == "o":
             self._arm_browser(pr)
-        elif key == "d":
-            self._open_diff(pr)
+        elif key in ("d", "v"):
+            self._open_pr_review(pr)
         elif key == "c":
             self._arm_comment(pr)
         elif key == "m":
@@ -718,8 +717,6 @@ class PullRequestsMixin:
             self._announce()
         elif key == "L" and self.pr_section == "checks":
             self._show_check_log(pr, detail)
-        elif key == "v":
-            self._open_pr_review(pr)
         elif key == "C":
             self._open_pr_menu("commits")
         elif key == "U":
@@ -739,9 +736,7 @@ class PullRequestsMixin:
                 mark = "\u2713 " if item["oid"] == pinned else "  "
                 items.append((("commit", item["oid"]), f"{mark}{item['oid'][:7]} {item['subject']}", ""))
             return items
-        items = list(MENU)
-        items.extend((action, label, "") for label, action in self._review_choices())
-        return items
+        return list(MENU)
 
     def _open_pr_menu(self, kind="actions"):
         pr = self._current_pr()
@@ -776,7 +771,7 @@ class PullRequestsMixin:
         elif self.pr_section == "files":
             files = ((detail or {}).get("view") or {}).get("files") or []
             if files:
-                self._open_diff(pr, path=files[min(self.pr_file_index, len(files) - 1)]["path"])
+                self._open_pr_review(pr, path=files[min(self.pr_file_index, len(files) - 1)]["path"])
 
     def _pr_menu_key(self, key, pr):
         items = self._pr_menu_items(pr)
@@ -793,17 +788,11 @@ class PullRequestsMixin:
         return key in ("esc", ".")
 
     def _run_menu(self, action, pr):
-        at = self.pr_menu
         self.pr_menu = None
         if isinstance(action, tuple):
             if action[0] == "commit":
                 self.pr_commit_oid = action[1]
                 self._open_pr_review(pr)
-            elif action[0] == "skill":
-                self._toggle_skill(action[1])
-                self.pr_menu = at
-            elif action[0] == "review":
-                self._arm_review()
             return
         if action == "review-diff":
             self._open_pr_review(pr)
@@ -813,8 +802,6 @@ class PullRequestsMixin:
             self._arm_browser(pr)
         elif action == "detail":
             self._open_detail(pr)
-        elif action == "diff":
-            self._open_diff(pr)
         elif action == "comment":
             self._arm_comment(pr)
         elif action == "note":
@@ -840,6 +827,8 @@ class PullRequestsMixin:
                     self.pr_menu = None
                 else:
                     self._open_pr_menu()
+            elif name == "commits":
+                self._open_pr_menu("commits")
             return
         if kind == "pr-menu":
             self._run_menu(hit["action"], pr)
@@ -1051,9 +1040,12 @@ class PullRequestsMixin:
             rows.append((" " + paint(gone, "35", plain), {"kind": "pr-head", "spans": [(0, self.cols, "selector")]}))
         view = self.diff_view
         if self.pr_diff_open and view is not None and view.get("pr") == tuple(pr["key"]):
-            what = f"commit {self.pr_commit_oid[:7]}" if self.pr_commit_oid else "whole PR"
-            rows.append((" " + paint(f"Review diff \u00b7 {what} \u00b7 Esc closes", "2", plain), None))
-            rows.extend(self._diff_rows(plain, max(1, budget - len(rows)), []))
+            pill = f"Commit {self.pr_commit_oid[:7]} \u25be" if self.pr_commit_oid else "Whole PR \u25be"
+            lead = " Diff  "
+            start = width(lead)
+            row = lead + paint(f"[ {pill} ]", CHIP, plain) + "  " + paint("Esc closes", MUTED_SGR, plain)
+            rows.append((row, {"kind": "pr-head", "spans": [(start, start + width(pill) + 4, "commits")]}))
+            rows.extend(self._diff_rows(plain, max(1, budget - len(rows)), self._agent_drafts("diff")))
             return [text for text, _ in rows], [hit for _, hit in rows]
         if budget >= 16:
             rows.append((paint("\u2500" * self.cols, "2", plain), None))

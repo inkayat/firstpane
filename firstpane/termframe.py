@@ -7,6 +7,32 @@ OSC 8, kitty graphics). Anything else is an error so the caller can resync, not 
 from firstpane.cells import char_width
 
 
+def on_surface(sgr, base):
+    """`sgr` with every reset, default foreground (39) and default background (49) replaced by
+    the `base` "fg;bg" pair. Extended colors (38/48/58 with 5 or 2) pass through whole."""
+    fg, bg = base
+    params = sgr.split(";")
+    out = []
+    index = 0
+    while index < len(params):
+        token = params[index]
+        if token in ("", "0"):
+            out += ["0", fg, bg]
+        elif token == "39":
+            out.append(fg)
+        elif token == "49":
+            out.append(bg)
+        elif token in ("38", "48", "58") and index + 1 < len(params) and params[index + 1] in ("5", "2"):
+            count = 3 if params[index + 1] == "5" else 5
+            out += params[index : index + count]
+            index += count
+            continue
+        else:
+            out.append(token)
+        index += 1
+    return ";".join(out)
+
+
 class TermGrid:
     def __init__(self):
         self.width = 0
@@ -32,16 +58,21 @@ class TermGrid:
             return "unsupported"
         return None
 
-    def rows(self, show_cursor):
+    def rows(self, show_cursor, base=None):
+        """Painted rows. With `base` (an fg;bg SGR pair), the shell's default colors (reset,
+        39, 49) become that surface; colors the shell chose are kept."""
         lines = []
         for r, cells in enumerate(self.cells):
             parts = []
             current = None
             for c, (text, sgr) in enumerate(cells):
+                if text == "":
+                    continue  # the second cell of a wide character: the character covers it
                 shown = text
+                if base:
+                    sgr = on_surface(sgr, base)
                 if show_cursor and self.visible and r == self.row and c == self.col and shown:
-                    shown = shown
-                    sgr = "7"
+                    sgr = sgr + ";7" if base else "7"
                 if sgr != current:
                     if current is not None:
                         parts.append("\x1b[0m")

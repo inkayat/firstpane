@@ -6,7 +6,7 @@ what is not known is left out, not guessed.
 """
 
 from firstpane.agents_view import ACCENT, BORDER, BRIGHT, GREEN, INK, MUTED, PINK, YELLOW, _fg, _on, _plural
-from firstpane.board import COLUMN_GLYPH
+from firstpane.board import COLUMN_GLYPH, is_pending_request
 from firstpane.cells import clip, pad, width
 from firstpane.sanitize import sanitize
 from firstpane.style import SELECTED_BG
@@ -39,7 +39,7 @@ def meta_text(task, files):
     """The fourth card line: awaiting reply, changed files, then what the task is doing or why it
     waits. Each part exists only when the projection or the live workspace says it."""
     parts = []
-    if task.get("captain_review"):
+    if is_pending_request(task):
         parts.append(("Awaiting reply", YELLOW))
     if files:
         parts.append((files, INK))

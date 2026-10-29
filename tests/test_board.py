@@ -17,7 +17,9 @@ from firstpane.config import Config
 from tests.support import Clock, CmdResult, FakeTerminal, FakeTransport, pane, strip_sgr, write_meta
 
 FM_BOARD = fm_board_path(os.environ)
-WRITERS = ("fm-tasks-axi.sh", "fm-home-summary-refresh.sh", "fm-spawn.sh")
+READS = {"fm-tasks-axi.sh": {"show"}, "fm-captain-hold.sh": {"open"}}
+ALWAYS_WRITERS = ("fm-home-summary-refresh.sh", "fm-spawn.sh")
+MUTATIONS = ("add", "hold", "unhold", "start", "done", "answer", "answers", "reconcile")
 
 
 def plain(frame):
@@ -130,7 +132,18 @@ class BoardFixture(unittest.TestCase):
         return plain(app.render())
 
     def writers(self):
-        return [call["argv"] for call in self.transport.calls if any(name in call["argv"][0] for name in WRITERS) or (len(call["argv"]) > 1 and call["argv"][1] in ("add", "hold", "unhold", "start"))]
+        found = []
+        for call in self.transport.calls:
+            argv = call["argv"]
+            base = os.path.basename(argv[0])
+            sub = argv[1] if len(argv) > 1 else ""
+            if base in ALWAYS_WRITERS:
+                found.append(argv)
+            elif base in READS and sub not in READS[base]:
+                found.append(argv)
+            elif sub in MUTATIONS:
+                found.append(argv)
+        return found
 
 
 class BoardAppTests(BoardFixture):
@@ -209,6 +222,7 @@ class BoardAppTests(BoardFixture):
         app.handle_key("a")
         app.handle_key("enter")
         app.handle_key("y")
+        app.handle_key("esc")
         self.assertEqual(app.screen, "tree")
         self.assertFalse((self.state / "board-intake.json").exists())
         row = next(index + 1 for index, line in enumerate(plain(app.render()).splitlines()) if "All tasks" in line)
@@ -216,7 +230,12 @@ class BoardAppTests(BoardFixture):
         app.handle_bytes(f"\x1b[<0;{col};{row}M\x1b[<0;{col};{row}m".encode())
         app.handle_key("r")
         self.assertEqual(self.writers(), [])
-        self.assertEqual(len(self.transport.calls), len(before) + 1)
+        added = self.transport.calls[len(before):]
+        self.assertEqual([call["argv"][1:] for call in added if call["argv"][-2:] == ["list", "--json"]], [["list", "--json"]])
+        self.assertTrue(all(
+            call["argv"][-2:] == ["list", "--json"] or (len(call["argv"]) > 1 and call["argv"][1] == "show")
+            for call in added
+        ))
         self.assertEqual(self.transport.calls[-1]["argv"][1:], ["list", "--json"])
 
     def test_selected_task_message_survives_tabs_and_does_not_write_a_task(self):

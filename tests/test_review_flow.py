@@ -13,7 +13,7 @@ from firstpane.review import RESULT_SCHEMA, ReviewConfig
 from firstpane.termframe import TermGrid
 from firstpane.workspace import FileEntry, parse_diff
 from tests.support import CmdResult, pane
-from tests.test_panel import PanelFixture
+from tests.test_panel import PanelFixture, plain
 from tests.test_pr_review import DIFF, ReviewFixture
 
 
@@ -60,6 +60,282 @@ def make_skill(root):
     return str(skill)
 
 
+class ReviewFrameTests(PanelFixture):
+    """What the Review tab shows and lets you reach without knowing hidden keys."""
+
+    def screen(self, app):
+        return "\n".join(self.lines(app))
+
+    def test_workspace_and_pull_request_are_visible_sub_tabs_and_a_click_keeps_the_place(self):
+        # Break: the PR source is reachable only through a hidden key, or switching back loses
+        # the workspace diff position.
+        self.changed_readme()
+        app = self.app()
+        self.open_changes(app)
+        app.render()
+        screen = self.screen(app)
+        self.assertIn("Workspace", screen)
+        self.assertIn("Pull Request", screen)
+        app.handle_key("G")
+        cursor = app.diff_view["cursor"]
+        self.click_text(app, "Pull Request")
+        self.assertEqual(app.review_source, "pr")
+        self.click_text(app, "Workspace")
+        self.assertEqual(app.review_source, "workspace")
+        self.assertEqual(app.diff_view["cursor"], cursor)
+
+    def test_the_code_review_control_lists_the_skills_and_runs_the_chosen_ones(self):
+        # Break: skills and Run review hide in an overflow menu, or the control does not show
+        # how many skills are chosen.
+        self.changed_readme()
+        self.config.review = ReviewConfig(("reviewer",), (make_skill(self.root),), 60)
+        app = self.app()
+        self.open_changes(app)
+        self.assertIn("Code review \u00b7 0 skills", self.screen(app))
+        self.click_text(app, "Code review")
+        menu = self.screen(app)
+        self.assertIn("Run review", menu)
+        self.click_text(app, "reviewer")
+        self.assertIn("Code review \u00b7 1 skill", self.screen(app))
+        self.click_text(app, "Run review")
+        self.assertEqual(app.screen, "confirm-review")
+
+    def test_code_review_without_a_command_says_how_to_set_it_up(self):
+        # Break: with no review command the control is missing (nothing says why), or it
+        # pretends a review can run.
+        self.changed_readme()
+        app = self.app()
+        self.open_changes(app)
+        self.assertIn("Code review: not set up", self.screen(app))
+        self.click_text(app, "Code review")
+        self.assertIn("review.command", app.status)
+        self.assertEqual(app.screen, "tree")
+
+    def test_the_revision_control_is_visible_and_a_commit_shows_its_own_files(self):
+        # Break: commits hide behind an overflow menu, or a pinned commit still shows the
+        # workspace's file and file count.
+        self.fx.write("one.txt", "alpha\nbeta\n", root=self.wt_a)
+        self.fx.write("two.txt", "gamma\ndelta\n", root=self.wt_a)
+        self.fx.git(self.wt_a, "add", "one.txt", "two.txt")
+        self.fx.git(self.wt_a, "commit", "-q", "-m", "add two files")
+        oid = self.fx.head(self.wt_a)
+        self.changed_readme()
+        app = self.app()
+        self.open_changes(app)
+        self.assertIn("Uncommitted \u25be", self.screen(app))
+        self.click_text(app, "Uncommitted \u25be")
+        self.click_text(app, "add two files")
+        screen = self.screen(app)
+        self.assertIn(f"Commit {oid[:7]} \u25be", screen)
+        self.assertIn("one.txt \u25be", screen)
+        self.assertIn("1 / 2", screen)
+        self.click_text(app, "one.txt \u25be")
+        rows = [index + 1 for index, line in enumerate(self.lines(app)) if "two.txt" in line and "\u25be" not in line]
+        self.click(app, rows[0], col=8)
+        view = app.diff_view
+        self.assertEqual(app._line_path(view, view["cursor"]), "two.txt")
+        self.assertIn("2 / 2", self.screen(app))
+
+    def test_the_footer_shows_the_selection_mode_and_its_line_count(self):
+        # Break: v/V selection has no visible mode, so the user cannot tell a range is active or
+        # how many lines a message will carry.
+        self.changed_readme()
+        app = self.app()
+        self.open_changes(app)
+        app.render()
+        self.assertIn("NORMAL", self.screen(app))
+        app.handle_key("V")
+        app.handle_key("j")
+        self.assertIn("VISUAL \u00b7 2 lines", self.screen(app))
+        app.handle_key("esc")
+        self.assertNotIn("VISUAL", self.screen(app))
+
+    def test_the_workspace_sub_tab_shows_the_changed_file_count_and_the_top_tab_does_not(self):
+        # Break: the Workspace chip drops the count the design shows, or the count comes back
+        # beside the top-level Review tab.
+        self.changed_readme()
+        self.fx.write("new.txt", "a\n", root=self.wt_a)
+        app = self.app()
+        self.open_changes(app)
+        lines = self.lines(app)
+        self.assertEqual(lines[0].split()[:3], ["Agents", "?", "Review"])
+        self.assertNotIn("Review 2", lines[0])
+        source_row = next(line for line in lines if "Pull Request" in line)
+        self.assertIn("Workspace 2", source_row)
+
+    def test_every_added_line_offers_a_plus_that_writes_about_that_line(self):
+        # Break: only the cursor line has a [+], so the design's per-line action is missing,
+        # or a click on another line's [+] writes about the cursor line instead.
+        self.fx.write("README.md", "one\nTWO\nthree\nfour\n", root=self.wt_a)
+        app = self.app()
+        self.open_changes(app)
+        app.render()
+        added = [line for line in self.lines(app) if "\u2502 + " in line or "\u258c + " in line]
+        self.assertEqual(len(added), 2)
+        self.assertTrue(all("[+]" in line for line in added), added)
+        row = self.row_of(app, "+ four")
+        line = self.lines(app)[row - 1]
+        self.click(app, row, col=line.rindex("[+]") + 2)
+        self.assertEqual(app.focus, "composer")
+        self.assertEqual((app.draft["anchor"]["path"], app.draft["anchor"]["new_start"]), ("README.md", 4))
+
+    def test_the_cursor_line_says_gd_and_gi_have_no_symbol_support(self):
+        # Break: the design's inline gd/gI hint is missing, or it promises a lookup Firstpane
+        # cannot do.
+        self.changed_readme()
+        app = self.app()
+        self.open_changes(app)
+        app.render()
+        cursor_row = next(line for line in self.lines(app) if "\u258c" in line)
+        self.assertIn("gd/gI: no symbol support", cursor_row)
+        others = [line for line in self.lines(app) if "\u2502" in line and "\u258c" not in line]
+        self.assertFalse(any("gd/gI" in line for line in others))
+
+    def test_a_wide_diff_has_a_horizontal_scrollbar_whose_arrows_scroll(self):
+        # Break: lines wider than the pane give no sign of what is cut off, or the bar's
+        # arrows do nothing.
+        self.fx.write("README.md", "one\n" + "x" * 300 + "\nthree\n", root=self.wt_a)
+        app = self.app()
+        self.open_changes(app)
+        app.render()
+        bar = self.row_of(app, "\u25c0")
+        line = self.lines(app)[bar - 1]
+        self.assertIn("\u25b6", line)
+        self.click(app, bar, col=line.index("\u25b6") + 1)
+        self.assertGreater(app.diff_view["xoff"], 0)
+        self.click(app, bar, col=line.index("\u25c0") + 1)
+        self.assertEqual(app.diff_view["xoff"], 0)
+
+    def test_a_diff_that_fits_has_no_scrollbar(self):
+        # Break: the scrollbar row takes a diff row even when nothing is cut off.
+        self.changed_readme()
+        app = self.app()
+        self.open_changes(app)
+        self.assertNotIn("\u25c0", "\n".join(self.lines(app)))
+
+    def test_the_selected_line_count_shows_beside_the_file_counts(self):
+        # Break: a line range has no count next to the file's +/- figures as in the design.
+        self.changed_readme()
+        app = self.app()
+        self.open_changes(app)
+        app.render()
+        app.handle_key("V")
+        app.handle_key("j")
+        stats = next(line for line in self.lines(app) if "unstaged" in line)
+        self.assertIn("2 lines selected", stats)
+
+    def test_the_expand_icon_toggles_focus_and_keeps_the_place(self):
+        # Break: the expand icon does nothing, or returning to the normal view jumps the
+        # cursor, the scroll, the selected lines, or drops the unsent draft.
+        self.fx.write("README.md", "\n".join(f"row {i:02d} " + "x" * 80 for i in range(1, 30)) + "\n", root=self.wt_a)
+        app = self.app()
+        self.open_changes(app)
+        app.render()
+        app.handle_key("j")
+        app.handle_key("j")
+        app.handle_key("V")
+        app.handle_key("j")
+        bar = self.row_of(app, "\u25c0")
+        bar_line = self.lines(app)[bar - 1]
+        self.click(app, bar, col=bar_line.index("\u25b6") + 1)
+        app.handle_key("enter")
+        self.type(app, "keep-me")
+        before = self.lines(app)
+        header = next(line for line in before if " / " in line)
+        diff_rows = sum(1 for line in before if "\u2502" in line or "\u258c" in line)
+        place = self._place(app)
+        self.assertEqual(place[-1], "keep-me")
+        self.click_text(app, "\u2922")
+        focused = self.lines(app)
+        self.assertNotIn("Write to FirstMate", "\n".join(focused))
+        self.assertNotIn(header, focused)
+        self.assertIn("Workspace", "\n".join(focused))
+        self.assertIn("\u2922", "\n".join(focused))
+        self.assertGreater(sum(1 for line in focused if "\u2502" in line or "\u258c" in line), diff_rows)
+        self.assertEqual(self._place(app), place)
+        self.click_text(app, "\u2922")
+        restored = "\n".join(self.lines(app))
+        self.assertIn("Write to FirstMate", restored)
+        self.assertIn(header, self.lines(app))
+        self.assertIn("keep-me", restored)
+        self.assertEqual(self._place(app), place)
+
+    def test_a_second_click_uses_the_icon_after_the_header_moves(self):
+        # Break: hiding the header leaves the icon on the old row, or a click on the icon
+        # where it is drawn does not restore the header and the message.
+        self.changed_readme()
+        app = self.app()
+        self.open_changes(app)
+        app.render()
+        before = self.row_of(app, "\u2922")
+        self.click_text(app, "\u2922")
+        focused = self.lines(app)
+        self.assertNotIn("Write to FirstMate", "\n".join(focused))
+        after = self.row_of(app, "\u2922")
+        self.assertLess(after, before)
+        self.click(app, before, col=self.lines(app)[before - 1].index("\u2922") + 1 if "\u2922" in self.lines(app)[before - 1] else 1)
+        self.assertNotIn("Write to FirstMate", "\n".join(self.lines(app)))
+        self.click_text(app, "\u2922")
+        restored = "\n".join(self.lines(app))
+        self.assertIn("Write to FirstMate", restored)
+        self.assertFalse(app.review_focus)
+
+    def test_writing_a_comment_from_focus_opens_the_message_again(self):
+        # Break: choosing a line comment while the header and message are hidden leaves the
+        # message hidden, or the message is about a different line.
+        self.fx.write("README.md", "one\nTWO\nthree\nfour\n", root=self.wt_a)
+        app = self.app()
+        self.open_changes(app)
+        self.click_text(app, "\u2922")
+        self.assertNotIn("Write to FirstMate", self.screen(app))
+        row = self.row_of(app, "+ four")
+        line = self.lines(app)[row - 1]
+        self.click(app, row, col=line.rindex("[+]") + 2)
+        shown = self.screen(app)
+        self.assertIn("Write to FirstMate", shown)
+        self.assertEqual(app.focus, "composer")
+        self.assertEqual((app.draft["anchor"]["path"], app.draft["anchor"]["new_start"]), ("README.md", 4))
+
+    def _place(self, app):
+        view = app.diff_view
+        return (
+            app.review_source,
+            view["cursor"],
+            view["top"],
+            view["xoff"],
+            view["mark"],
+            app.draft["body"] if app.draft else None,
+        )
+
+    def test_ctrl_enter_in_the_message_previews_and_sends_nothing(self):
+        # Break: Ctrl+Enter is ignored in the message, or it puts text in FirstMate's box
+        # without the preview and y.
+        self.changed_readme()
+        app = self.app()
+        self.open_changes(app)
+        app.render()
+        app.handle_key("enter")
+        self.type(app, "note")
+        app.handle_key("ctrl-enter")
+        self.assertEqual(app.screen, "confirm-send")
+        self.assertEqual(self.main.received, [])
+
+    def test_w_and_b_move_by_word_in_the_workspace_diff(self):
+        # Break: w opens a menu in the workspace diff, so word motion works only on PR diffs.
+        self.fx.write("README.md", "one\nalpha beta gamma\nthree\n", root=self.wt_a)
+        app = self.app()
+        self.open_changes(app)
+        app.render()
+        view = app.diff_view
+        view["cursor"] = next(index for index, line in enumerate(view["lines"]) if line.text == "alpha beta gamma")
+        app.handle_key("w")
+        self.assertIsNone(app.changes_menu)
+        self.assertEqual(view["col"], 6)
+        app.handle_key("w")
+        app.handle_key("b")
+        self.assertEqual(view["col"], 6)
+
+
 class WorkspaceReviewTests(PanelFixture):
     def setUp(self):
         super().setUp()
@@ -68,10 +344,84 @@ class WorkspaceReviewTests(PanelFixture):
 
     def start(self, app, reviewer):
         app.review_popen = reviewer
-        app._menu_pick(("skill", self.skill))
-        app._menu_pick(("review",))
+        for key in ("S", "enter", "j", "enter"):
+            app.handle_key(key)
         self.assertEqual(app.screen, "confirm-review")
         app.handle_key("y")
+
+    def two_changed_files(self):
+        self.changed_readme()
+        self.fx.write("other.txt", "first\nsecond\n", root=self.wt_a)
+
+    def menu_pick(self, app, needle):
+        """Open Code review with S and press Enter on the row containing `needle`."""
+        app.handle_key("S")
+        items = app._review_menu_items(True)
+        app.review_menu["cursor"] = next(index for index, item in enumerate(items) if needle in item[0])
+        app.handle_key("enter")
+
+    def test_a_review_of_uncommitted_changes_sends_every_changed_file(self):
+        # Break: only the file open in the diff is reviewed, so "current changes" misses files.
+        self.two_changed_files()
+        app = self.app()
+        self.open_changes(app)
+        app.render()
+        reviewer = FakeReviewer([])
+        self.start(app, reviewer)
+        self.assertEqual(sorted(row["path"] for row in reviewer.requests[0]["files"]), ["README.md", "other.txt"])
+
+    def test_editing_a_reviewed_file_marks_its_finding_stale_and_keeps_it(self):
+        # Break: only a HEAD move marks findings, so a finding on a line edited afterwards still
+        # looks current; or the stale finding disappears.
+        self.changed_readme()
+        app = self.app()
+        self.open_changes(app)
+        app.render()
+        self.start(app, FakeReviewer([finding("README.md", 2)]))
+        app.poll()
+        self.assertIsNone(app.review_findings[0].get("stale"))
+        self.fx.write("README.md", "one\nTWO changed again\nthree\nfour\n", root=self.wt_a)
+        self.clock.t += 20
+        app.refresh(manual=True)
+        app.render()
+        self.assertEqual([item["stale"] for item in app.review_findings], ["stale: file changed since review"])
+        app.handle_key("S")
+        self.assertIn("stale README.md:2", "\n".join(self.lines(app)))
+
+    def test_a_finding_opens_its_file_and_line_and_ctrl_o_returns(self):
+        # Break: findings are only markers on the open file, so a finding in another file
+        # cannot be reached, or Ctrl-O does not come back.
+        self.two_changed_files()
+        app = self.app()
+        self.open_changes(app)
+        app.render()
+        start = (app.diff_view["entry"].path, app.diff_view["cursor"])
+        self.start(app, FakeReviewer([finding("other.txt", 2)]))
+        app.poll()
+        self.menu_pick(app, "other.txt:2")
+        app.render()
+        view = app.diff_view
+        self.assertEqual((view["entry"].path, view["lines"][view["cursor"]].new), ("other.txt", 2))
+        app.handle_key("ctrl-o")
+        app.render()
+        self.assertEqual((app.diff_view["entry"].path, app.diff_view["cursor"]), start)
+
+    def test_a_finding_on_the_selected_lines_goes_into_the_message(self):
+        # Break: findings cannot be added to the message context, so FirstMate gets the lines
+        # without what the review said about them.
+        self.changed_readme()
+        app = self.app()
+        self.open_changes(app)
+        app.render()
+        self.start(app, FakeReviewer([finding("README.md", 2)]))
+        app.poll()
+        view = app.diff_view
+        view["cursor"] = next(index for index, line in enumerate(view["lines"]) if line.kind == "+" and line.new == 2)
+        app.handle_key("enter")
+        self.type(app, "is this right")
+        app.handle_key("enter")
+        self.assertEqual(app.screen, "confirm-send")
+        self.assertIn("review finding low: look at README.md\nb\n", app.pending["body"])
 
     def test_a_finished_review_is_applied_once_and_later_status_and_stale_marks_survive(self):
         # Break: every poll re-reads the finished run, so a later status message and a stale
@@ -284,6 +634,47 @@ class PullRequestReviewTests(ReviewFixture):
         app.review_popen = reviewer
         app.handle_key("y")
 
+    def keys_through_code_review(self, app):
+        """S opens Code review, Enter picks the first skill, then j and Enter run it."""
+        for key in ("S", "enter", "j", "enter"):
+            app.handle_key(key)
+
+    def test_lines_selected_in_the_pr_diff_become_a_firstmate_draft_pinned_to_the_pr(self):
+        # Break: PR diff lines cannot be attached, or the message carries no PR or revision, so
+        # FirstMate cannot tell which PR state the lines came from.
+        app = self.app()
+        app.handle_key("v")
+        view = app.diff_view
+        view["cursor"] = next(index for index, line in enumerate(view["lines"]) if line.text == "SIDEBAR_LINE")
+        app.handle_key("enter")
+        self.assertEqual(app.focus, "composer")
+        anchor = app.draft["anchor"]
+        self.assertEqual((anchor["source"], anchor["path"], anchor["revision"]), ("pr", "app/sidebar.py", "0123456789abcdef0123456789abcdef01234567"))
+        app.handle_bytes("why this line".encode())
+        app.handle_key("enter")
+        self.assertEqual(app.screen, "confirm-send")
+        body = app.pending["body"]
+        self.assertIn("source pr  revision 0123456789abcdef0123456789abcdef01234567  https://github.com/acme/alpha/pull/7", body)
+        self.assertIn("+SIDEBAR_LINE", body)
+        self.assertEqual([warning for warning in app.pending["warnings"] if "workspace" in warning], [])
+
+    def test_a_file_in_the_files_section_opens_in_the_review_diff(self):
+        # Break: Enter on a PR file opens a plain text page with no line numbers or selection.
+        app = self.app()
+        app._set_section("files")
+        app.handle_key("enter")
+        self.assertEqual(app.screen, "tree")
+        self.assertTrue(app.pr_diff_open)
+        view = app.diff_view
+        self.assertEqual(app._line_path(view, view["cursor"]), "app/sidebar.py")
+
+    def test_the_pull_request_source_shows_the_same_review_frame(self):
+        # Break: the PR source drops the sub-tabs or the Code review control.
+        text = self.text(self.app())
+        self.assertIn("Workspace", text)
+        self.assertIn("Pull Request #7", text)
+        self.assertIn("Code review \u00b7 0 skills", text)
+
     def test_the_pr_diff_opens_in_the_viewport_and_is_reviewed_by_its_own_headers(self):
         # Break: PR review is unreachable (no diff view), sends a file the PR does not contain,
         # or pins the wrong head.
@@ -293,8 +684,7 @@ class PullRequestReviewTests(ReviewFixture):
         self.assertIn("SIDEBAR_LINE", self.text(app))
         reviewer = FakeReviewer([finding("app/sidebar.py", 1)])
         app.review_popen = reviewer
-        app._run_menu(("skill", self.skill), app._current_pr())
-        app._run_menu(("review",), app._current_pr())
+        self.keys_through_code_review(app)
         self.assertEqual(app.screen, "confirm-review")
         app.handle_key("y")
         request = reviewer.requests[0]
@@ -321,8 +711,7 @@ class PullRequestReviewTests(ReviewFixture):
         self.assertIn("COMMIT_LINE", self.text(app))
         reviewer = FakeReviewer([])
         app.review_popen = reviewer
-        app._run_menu(("skill", self.skill), app._current_pr())
-        app._run_menu(("review",), app._current_pr())
+        self.keys_through_code_review(app)
         app.handle_key("y")
         request = reviewer.requests[0]
         self.assertEqual((request["scope"], request["revision"]["commit"]), ("pr_commit", self.OIDS[2]))
@@ -448,8 +837,135 @@ class TerminalLifecycleTests(PanelFixture):
         send({"type": "terminal.frame", "bytes": good, "full": True, "width": 10, "height": 2})
         self.assertEqual(app.terminal_status, "")
 
+    def frame(self, text, width, height, full=True):
+        data = base64.b64encode(text.encode()).decode()
+        return json.dumps({"type": "terminal.frame", "bytes": data, "full": full, "width": width, "height": height}).encode() + b"\n"
+
+    def control_size(self, child):
+        argv = child.argv
+        return int(argv[argv.index("--cols") + 1]), int(argv[argv.index("--rows") + 1])
+
+    def test_frames_that_arrive_together_are_all_drawn(self):
+        # Break: one line is read per poll and the rest wait in a read buffer the next select
+        # never reports, so the tab stays blank or a frame behind the shell.
+        app = self.app()
+        self.attach(app)
+        child = self.popens[0]
+        child.feed(self.frame("\x1b[1;1Hfirst", 20, 2) + self.frame("\x1b[1;1Hprompt-now", 20, 2, full=False))
+        app.render()
+        self.assertIn("prompt-now", plain(app.render()))
+
+    def test_the_bottom_row_of_the_shell_is_on_screen(self):
+        # Break: the shell is sized taller than the rows the tab shows, so its prompt at the
+        # bottom (after output filled the screen) is cut off and typing seems to do nothing.
+        app = self.app(rows=30, cols=100)
+        self.attach(app)
+        child = self.popens[0]
+        cols, rows = self.control_size(child)
+        self.assertEqual(cols, 100)
+        child.feed(self.frame(f"\x1b[1;1Htop-row\x1b[{rows};1Hbottom-prompt", cols, rows))
+        screen = plain(app.render())
+        self.assertIn("top-row", screen)
+        self.assertIn("bottom-prompt", screen)
+
+    def test_default_shell_colors_sit_on_the_firstpane_surface_and_shell_colors_stay(self):
+        # Break: Herdr's reset-form SGR (0;39;49) is passed through, so the shell's default
+        # cells use the host terminal's colors instead of the surface every other tab uses.
+        app = self.app()
+        self.attach(app)
+        self.popens[0].feed(self.frame("\x1b[1;1H\x1b[0;39;49mplain-cell\x1b[0;1;38;5;4;41mred-cell", 30, 2))
+        app.render()
+        line = next(line for line in app.render().split("\n") if "plain-cell" in line)
+        self.assertEqual(effective_colors(line, "plain-cell"), ("38;2;226;233;248", "48;2;16;22;35"))
+        self.assertEqual(effective_colors(line, "red-cell"), ("38;5;4", "41"))
+
+    def test_a_shell_that_is_gone_is_replaced_not_attached(self):
+        # Break: a record left from an earlier Herdr server is attached as is; the control
+        # closes at once and the tab stays blank.
+        app = self.app()
+        app.terminal_popen = self.popen
+        directory = os.path.realpath(self.wt_a)
+        app._terminal_book_for().note(directory, state="ready", label="old", terminal_id="term_gone", pane_id="w9:gone", tab_id="w9:tx", workspace_id="w9")
+        app.handle_key("1")
+        self.select(app, "alpha-task")
+        app._set_tab("terminal")
+        app.render()
+        self.assertEqual(len(self.created), 1)
+        self.assertEqual([child for child in self.popens if "term_gone" in child.argv], [])
+        self.assertIn("term_new1", self.popens[-1].argv)
+
+    def test_a_closed_control_says_why_and_takeover_waits_for_t(self):
+        # Break: terminal.closed is ignored, so the tab is blank with no reason, or Firstpane
+        # takes the shell over from another client without being asked.
+        app = self.app()
+        self.attach(app)
+        reason = "terminal attach failed: terminal term_new1 already has an attached client; retry with --takeover"
+        self.popens[0].feed(json.dumps({"type": "terminal.closed", "reason": reason}).encode() + b"\n")
+        app.render()
+        self.assertIn("attached elsewhere", plain(app.render()))
+        self.assertEqual(len(self.popens), 1)
+        app.handle_key("t")
+        app.render()
+        self.assertEqual(len(self.popens), 2)
+        self.assertIn("--takeover", self.popens[1].argv)
+
+    def test_a_click_in_the_shell_gives_it_the_keyboard(self):
+        # Break: only f/Enter hand the keyboard over, so clicking the shell and typing does nothing.
+        app = self.app()
+        self.attach(app)
+        child = self.popens[0]
+        child.feed(self.frame("\x1b[1;1Hclick-here", 20, 2))
+        app.render()
+        row = next(index for index, line in enumerate(plain(app.render()).split("\n")) if "click-here" in line) + 1
+        app.handle_bytes(f"\x1b[<0;3;{row}M\x1b[<0;3;{row}m".encode())
+        app.handle_bytes(b"ls")
+        sent = [json.loads(chunk) for chunk in b"".join(child.stdin.chunks).splitlines()]
+        self.assertIn({"type": "terminal.input", "bytes": base64.b64encode(b"ls").decode()}, sent)
+
+
+def effective_colors(line, needle):
+    """(fg, bg) SGR in force where `needle` starts in a painted line; None is the host default."""
+    fg = bg = None
+    at = 0
+    end = line.index(needle)
+    while at < end:
+        if line.startswith("\x1b[", at):
+            close = line.index("m", at)
+            params = line[at + 2 : close].split(";")
+            index = 0
+            while index < len(params):
+                token = params[index]
+                if token in ("", "0"):
+                    fg = bg = None
+                elif token in ("38", "48") and index + 1 < len(params):
+                    count = 3 if params[index + 1] == "5" else 5
+                    value = ";".join(params[index : index + count])
+                    fg, bg = (value, bg) if token == "38" else (fg, value)
+                    index += count
+                    continue
+                elif token == "39":
+                    fg = None
+                elif token == "49":
+                    bg = None
+                elif token.isdigit() and (30 <= int(token) <= 37 or 90 <= int(token) <= 97):
+                    fg = token
+                elif token.isdigit() and (40 <= int(token) <= 47 or 100 <= int(token) <= 107):
+                    bg = token
+                index += 1
+            at = close + 1
+        else:
+            at += 1
+    return fg, bg
+
 
 class TermGridSafetyTests(unittest.TestCase):
+    def test_a_wide_character_takes_two_cells_not_three(self):
+        # Break: the second half of a wide character is drawn as an extra space, so every
+        # wide character pushes the rest of the row one column right.
+        grid = TermGrid()
+        grid.apply("\x1b[1;1H漢x".encode(), True, 4, 1)
+        self.assertEqual(plain(grid.rows(False)[0]), "漢x ")
+
     def test_c1_controls_and_delete_are_not_drawn(self):
         # Break: U+009B (CSI) or DEL from the shell is re-emitted to the host terminal.
         for char in ("\x9b", "\x7f", "\x85"):

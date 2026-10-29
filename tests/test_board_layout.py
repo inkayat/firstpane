@@ -98,7 +98,7 @@ class LaneTests(LayoutFixture):
         self.assertIn("herdr-project-sidebar", frame)
         self.assertIn("editing", frame)
         self.assertIn("Awaiting reply", frame)
-        self.assertIn("1 awaiting reply", frame)
+        self.assertIn("1 awaiting your reply", frame)
         self.assertIn("until later: parked", frame)
         for invented in ("PR #", "Checks", "checks", "files changed", "file changed", "\u2197"):
             self.assertNotIn(invented, frame)
@@ -321,15 +321,18 @@ class MessageBlockTests(LayoutFixture):
         self.assertEqual(again, label)
         self.assertIn("fp-sync-0a1b \u00b7 Workspace alignment", lines[again + 1])
 
-    def test_enter_adds_the_projections_reasons_to_the_detail_without_moving_the_message_block(self):
-        # Break: the detail expansion pushes the message block off the pane.
+    def test_enter_opens_detail_in_place_and_esc_returns_to_the_lanes(self):
+        # Break: Enter leaves the lanes in place, or Esc does not return to the same message block.
         app = self.board()
-        label, _ = self.block(app)
         app.handle_key("enter")
-        again, lines = self.block(app)
-        self.assertEqual(len(lines), 36)
-        self.assertEqual(again, label)
-        self.assertTrue(any(line.strip().startswith("Reason") and "until later: parked" in line for line in lines))
+        app.render()
+        self.assertEqual(app.board_view, "detail")
+        self.assertNotIn("TODO 2", self.text(app))
+        self.assertIn("Write to FirstMate", self.text(app))
+        app.handle_key("esc")
+        self.assertEqual(app.board_view, "lanes")
+        self.assertIn("TODO 2", self.text(app))
+        self.assertIn("Write to FirstMate", self.text(app))
 
     def test_draft_and_chip_survive_selection_refresh_and_the_close_button(self):
         # Break: a refresh, another selection or closing the editor loses the unsent text.

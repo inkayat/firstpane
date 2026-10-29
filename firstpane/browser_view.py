@@ -336,7 +336,7 @@ class BrowserTabMixin:
 
     # ---- main loop hooks -------------------------------------------------------------
     def io_fds(self):
-        return self.browser.fds() + self.placed.fds()
+        return self.browser.fds() + self.placed.fds() + self._terminal_fds()
 
     def io_deadline(self):
         return self.browser.deadline()

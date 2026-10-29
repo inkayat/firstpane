@@ -668,7 +668,8 @@ class GroupingTests(AppFixture):
         app.refresh()
         self.assertEqual(self.methods().count("session.snapshot"), 2)
         self.assertEqual(self.gh_calls(), [])
-        self.assertNotIn("pr", " ".join(call["argv"][0] for call in self.transport.calls))
+        other = [call for call in self.transport.calls if not str(call["argv"][0]).endswith("fm-board")]
+        self.assertNotIn("pr", " ".join(call["argv"][0] for call in other))
         git_calls = [call for call in self.transport.calls if call["argv"][:1] == ["git"]]
         self.assertEqual(git_calls, [])
 
@@ -952,6 +953,7 @@ class PullRequestTests(AppFixture):
                             "isDraft": True,
                             "headRefName": "fm/alpha-task",
                             "baseRefName": "main",
+                            "headRefOid": "0123456789abcdef0123456789abcdef01234567",
                             "body": "SECRET_BODY\x1b]0;PWN\x07",
                             "reviewDecision": None,
                             "statusCheckRollup": None,
@@ -1402,27 +1404,30 @@ class PullRequestTests(AppFixture):
         app = self.app(submit=submit)
         self.expand_prs(app)
         self.assertEqual(self.gh_calls(), [])
-        self.assertEqual(len(pending), 1)
+        fetches = [(fn, fut) for fn, fut in pending if getattr(fn, "__name__", "") != "_load_board"]
+        self.assertEqual(len(fetches), 1)
         loading = strip_sgr(app.render())
         self.assertIn("loading", loading)
         self.assertNotIn("#3", loading)
         app.handle_key("k")
         app.refresh(manual=True)
-        self.assertEqual(len(pending), 1)
-        fn, future = pending[0]
+        fetches = [(fn, fut) for fn, fut in pending if getattr(fn, "__name__", "") != "_load_board"]
+        self.assertEqual(len(fetches), 1)
+        fn, future = fetches[0]
         future.set_result(fn())
         landed = strip_sgr(app.render())
         self.assertIn("#1 \u00b7 Title 1", landed)
         self.assertIn("loading pull request", landed)
         self.assertNotIn("projects checked", landed)
         self.assertEqual(len([call for call in self.gh_calls() if "list" in call["argv"]]), 1)
-        self.assertEqual(len(pending), 3)
-        fn, future = pending[1]
+        fetches = [(fn, fut) for fn, fut in pending if getattr(fn, "__name__", "") != "_load_board"]
+        self.assertEqual(len(fetches), 3)
+        fn, future = fetches[1]
         future.set_result(fn())
         facts = strip_sgr(app.render())
         self.assertNotIn("loading pull request", facts)
         self.assertIn("comments loading", facts)
-        fn, future = pending[2]
+        fn, future = fetches[2]
         future.set_result(fn())
         self.assertNotIn("loading", strip_sgr(app.render()))
 
