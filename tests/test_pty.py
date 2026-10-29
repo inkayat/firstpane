@@ -249,6 +249,21 @@ class PtyTests(unittest.TestCase):
         except (OSError, ValueError, KeyError):
             pass
 
+    def enable_queue(self):
+        tool = self.tmp / "fm-tool"
+        (tool / "bin").mkdir(parents=True, exist_ok=True)
+        self.note_out = self.tmp / "queued-note.txt"
+        script = tool / "bin" / "fm-inbox.sh"
+        script.write_text("#!/bin/sh\ncat > '%s'\nprintf '%%s\\n' '%s'\nexit 0\n" % (
+            self.note_out,
+            '{"schema":"fm-inbox-note.v1","outcome":"created","id":"n1","request_id":"r1","saved":true,"announced":true,"acknowledged":false,"path":"/tmp/n1.note"}',
+        ))
+        script.chmod(0o755)
+        config = self.tmp / "config" / "config.json"
+        data = json.loads(config.read_text())
+        data["firstmate_root"] = str(tool)
+        config.write_text(json.dumps(data))
+
     def configure_browser(self):
         tb = self.tmp / "tb"
         (tb / "bin").mkdir(parents=True)
@@ -287,6 +302,7 @@ class PtyTests(unittest.TestCase):
         # an unsent inline draft. Also: no Git write happens without an explicit confirm.
         head = self.fx.head(self.wt)
         index_before = (Path(self.fx.git(self.wt, "rev-parse", "--git-dir")) / "index").stat().st_mtime_ns
+        self.enable_queue()
         term = self.open()
         term.wait_for(lambda s: "Pty task" in s.text())
         self.assertTrue(term.screen.modes.get("2004"))
@@ -294,7 +310,7 @@ class PtyTests(unittest.TestCase):
         term.send(b"\r")
         before = len(term.raw)
         term.send(b"2")
-        term.wait_for(lambda s: "/ pty-task" in s.lines()[1] and "1 file" in s.lines()[2])
+        term.wait_for(lambda s: "/ pty-task" in s.lines()[1] and "Workspace 1" in s.text())
         term.wait_for(lambda s: "README.md \u25be" in s.text() and "+ TWO" in s.text())
         self.assertIn("Write to FirstMate", term.screen.text())
         self.assertIn("48;2;16;22;35", term.raw[before:])
@@ -308,19 +324,19 @@ class PtyTests(unittest.TestCase):
         term.wait_for(lambda s: "Merhaba dünya ğüşiöç ek satir y" in s.text() and "+ TWO" in s.text())
         self.assertTrue(all(len(line) <= 68 for line in term.screen.lines()))
         term.send(b"\r")
-        term.wait_for(lambda s: "Put in FirstMate's message box" in s.text())
+        term.wait_for(lambda s: "Queue this for FirstMate" in s.text())
         preview = term.screen.text()
         term.send(b"y")
-        term.wait_for(lambda s: "press Enter there to send" in s.text())
-        self.assertEqual(len(self.main.received), 1)
+        term.wait_for(lambda s: "queued for FirstMate" in s.text())
+        self.assertEqual(self.main.received, [])
         self.assertEqual(self.main.submitted, [])
-        self.assertRegex(self.main.text, r"^\[paste #1 \+\d+ lines\]$")
-        body = self.main.received[0].removeprefix("\x1b[200~").removesuffix("\x1b[201~")
+        self.assertEqual(self.main.text, "")
+        body = self.note_out.read_text()
         self.assertIn("agent: pty-task", body)
         self.assertIn(f"workspace: {self.wt}  (fm)", body)
         self.assertIn("Merhaba dünya ğüşiöç ek satir y", body)
         self.assertIn("[1] diff README.md  unstaged  new lines 2-2", body)
-        self.assertTrue(body.endswith("```diff\n+TWO\n```"))
+        self.assertIn("```diff\n+TWO\n```", body)
         for line in body.splitlines():
             self.assertIn(line[:60], preview)
         row = self.row_of(term.screen, "- two")
@@ -516,6 +532,7 @@ class PtyTests(unittest.TestCase):
         # status filter ignore input bytes, Turkish text or a bracketed paste does not reach
         # the message field, or a message leaves without the preview, about another agent,
         # or is submitted in FirstMate's box.
+        self.enable_queue()
         term = self.open(rows=30, cols=100)
         term.wait_for(lambda s: "Pty task" in s.text())
         self.assertTrue(all(len(line) <= 100 for line in term.screen.lines()))
@@ -535,14 +552,14 @@ class PtyTests(unittest.TestCase):
         term.wait_for(lambda s: "Merhaba dünya ğüşiöç ek satir y" in s.text())
         self.assertEqual(self.main.received, [])
         term.send(b"\r")
-        term.wait_for(lambda s: "Put in FirstMate's message box" in s.text() and "agent: pty-task" in s.text())
+        term.wait_for(lambda s: "Queue this for FirstMate" in s.text() and "agent: pty-task" in s.text())
         self.assertEqual(self.main.received, [])
         term.send(b"y")
-        term.wait_for(lambda s: "press Enter there to send" in s.text())
-        self.assertEqual(len(self.main.received), 1)
+        term.wait_for(lambda s: "queued for FirstMate" in s.text())
+        self.assertEqual(self.main.received, [])
         self.assertEqual(self.main.submitted, [])
-        self.assertIn("agent: pty-task", self.main.received[0])
-        self.assertIn("Merhaba dünya ğüşiöç ek satir y", self.main.received[0])
+        self.assertIn("agent: pty-task", self.note_out.read_text())
+        self.assertIn("Merhaba dünya ğüşiöç ek satir y", self.note_out.read_text())
         self.assertNotIn("pane.focus", self.herdr.calls)
 
     def test_the_real_entrypoint_shows_the_harness_image_once_accepted_and_deletes_it_at_exit(self):

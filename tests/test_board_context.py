@@ -881,13 +881,14 @@ class ReplyTests(DetailFixture):
         self.assertEqual(app.screen, "confirm-send")
         self.assertEqual(self.primary.received, [])
         app.handle_key("y")
-        self.assertEqual(len(self.primary.received), 1)
+        self.assertEqual(self.primary.received, [])
         self.assertEqual(self.primary.submitted, [])
+        notes = [call for call in self.transport.calls if call["argv"] and str(call["argv"][0]).endswith("fm-inbox.sh") and "note" in call["argv"]]
+        self.assertEqual(len(notes), 1)
+        self.assertIn("use the lanes", notes[0]["stdin"])
         self.assertIn("Agents \u26a0 1", self.plain_tab(app))
         self.assertEqual(self.plain_tab(app), before)
-        note = self.text(app)
-        self.assertIn("Press Enter there", note)
-        self.assertIn("request stays open", note)
+        self.assertEqual(self.writers(), [])
         self.tasks[0]["captain_review"] = False
         app.handle_key("r")
         self.assertNotIn("\u26a0", self.plain_tab(app))
@@ -1076,15 +1077,19 @@ class ReplyTests(DetailFixture):
         self.type_send(app, "use the lanes")
         app.handle_key("y")
         app.handle_key("y")
-        self.assertEqual(len(self.primary.received), 1)
+        self.assertEqual(self.primary.received, [])
         self.assertEqual(self.primary.submitted, [])
+        notes = [call for call in self.transport.calls if call["argv"] and str(call["argv"][0]).endswith("fm-inbox.sh") and "note" in call["argv"]]
+        self.assertEqual(len(notes), 1)
         app.handle_key("tab")
         for char in "again":
             app.handle_key(char)
         app.handle_key("enter")
-        self.assertEqual(app.screen, "tree")
-        self.assertIn("not transferred", app.status)
-        self.assertEqual(len(self.primary.received), 1)
+        app.handle_key("y")
+        notes = [call for call in self.transport.calls if call["argv"] and str(call["argv"][0]).endswith("fm-inbox.sh") and "note" in call["argv"]]
+        self.assertEqual(len(notes), 2)
+        self.assertNotEqual(notes[0]["argv"], notes[1]["argv"])
+        self.assertEqual(self.primary.received, [])
 
     def test_show_and_open_are_not_writers_and_answer_still_is(self):
         # Break: the read-only detail commands are refused, or an answer command is allowed through.

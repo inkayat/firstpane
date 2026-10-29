@@ -14,7 +14,7 @@ from pathlib import Path
 from firstpane.app import App
 from firstpane.board import fm_board_path, summary_facts, unavailable
 from firstpane.config import Config
-from tests.support import Clock, CmdResult, FakeTerminal, FakeTransport, pane, strip_sgr, write_meta
+from tests.support import Clock, CmdResult, FakeTerminal, FakeTransport, note_json, pane, strip_sgr, write_meta
 
 FM_BOARD = fm_board_path(os.environ)
 READS = {"fm-tasks-axi.sh": {"show"}, "fm-captain-hold.sh": {"open"}}
@@ -62,6 +62,7 @@ class BoardFixture(unittest.TestCase):
         (self.bin / "fm").chmod(0o755)
         (self.bin / "fm-board").write_text("#!/bin/sh\nexit 0\n")
         (self.tool / "bin" / "fm-tasks-axi.sh").write_text("#!/bin/sh\necho should-not-run\nexit 9\n")
+        (self.tool / "bin" / "fm-inbox.sh").write_text("#!/bin/sh\nexit 0\n")
         (self.tool / "bin" / "fm-home-summary-refresh.sh").write_text("#!/bin/sh\necho should-not-run\nexit 9\n")
         self.tasks = [{
             "id": "fp-keys-ab12",
@@ -115,6 +116,10 @@ class BoardFixture(unittest.TestCase):
         }))
         self.transport = FakeTransport()
         self.transport.handlers.append((lambda argv: argv[-2:] == ["list", "--json"], lambda call: CmdResult(0, json.dumps(self.tasks), "")))
+        self.transport.handlers.append((
+            lambda argv: argv and str(argv[0]).endswith("fm-inbox.sh") and "note" in argv,
+            lambda call: CmdResult(0, note_json("created", request_id=next((call["argv"][i + 1] for i, part in enumerate(call["argv"]) if part == "--request-id"), "firstpane-deadbeef"))),
+        ))
         self.env = {"PATH": f"{self.bin}:{os.environ.get('PATH', '/usr/bin:/bin')}", "HOME": str(self.root), "LANG": "C.UTF-8"}
         self.clock = Clock()
         self.config = Config(firstmate_home=str(self.home), firstmate_root=str(self.tool), socket_path=str(self.root / "herdr.sock"))

@@ -1,9 +1,7 @@
-"""The Pull Requests tab: one selected pull request, laid out as a review page.
+"""The Pull Requests source: the selected agent's associated pull request, laid out as a review page.
 
-Rows, top to bottom: the PR selector (number and title; it opens the project-wide PR list)
-with the GitHub and PR-actions controls, the state badge with head -> base and the changed
-files and +/- lines, check progress and open comments, the Files / Comments / Checks
-sub-tabs and the selected sub-tab. Every fact comes from `gh` for the selected PR; a fact gh
+The page shows a pull request only when a branch record or a recorded task URL proves it belongs
+to that agent's repository. It does not list every open pull request in the project. A fact gh
 did not return is shown as unknown, never guessed.
 
 Writes reuse the existing confirms (GitHub open, PR comment, PR note, the inline FirstMate
@@ -34,6 +32,18 @@ VIEW_FIELDS = (
     "changedFiles,files,reviewDecision,commits,reviews,comments,statusCheckRollup,updatedAt"
 )
 _RUN_URL = re.compile(r"/actions/runs/(\d+)(?:/|$)")
+_PR_URL = re.compile(r"^https://([^/\s]+)/([^/\s]+)/([^/\s]+)/pull/(\d+)(?:[/?#].*)?$")
+
+
+def parse_pr_url(url):
+    """host/owner/repo/number from an https pull URL, or None."""
+    match = _PR_URL.match((url or "").strip())
+    if not match:
+        return None
+    host, owner, repo, number = match.group(1), match.group(2), match.group(3), int(match.group(4))
+    if host.startswith("-") or ".." in owner or ".." in repo:
+        return None
+    return {"host": host, "owner": owner, "repo": repo, "number": number, "slug": f"{host}/{owner}/{repo}"}
 THREAD_LIMIT = 100
 COMMENT_LIMIT = 50
 THREADS_QUERY = (
@@ -456,6 +466,7 @@ class PullRequestsMixin:
         self.pr_check_index = 0
         self.pr_expanded = set()
         self.pr_details = {}
+        self.pr_association = None
         self._pr_jobs = {}
         self._pr_top = 0
         self._pr_follow = True
@@ -464,35 +475,107 @@ class PullRequestsMixin:
 
     # ---- which PR --------------------------------------------------------------------
     def _all_prs(self):
-        return [row for project in self._pr_projects() if self._pr_state(project) == "prs" for row in project["pr_rows"]]
+        """Open PRs of the selected agent's project only. Other projects are not an inventory."""
+        project = self._agent_project()
+        if project is None or self._pr_state(project) != "prs":
+            return []
+        return list(project["pr_rows"])
 
-    def _target_branch(self):
+    def _agent_project(self):
+        key = (self.target or {}).get("project_key")
+        return self._project(key) if key else None
+
+    def _branch_record(self):
+        """(known|detached|unknown, branch name). A missing read is unknown, not 'no branch'."""
         info = self._ws_info(self.target) if self.target else None
-        status = info.get("status") if info else None
-        if status is None or status.detached or not status.head:
+        if info is None:
+            return "unknown", None
+        status = info.get("status")
+        if status is None:
+            return "unknown", None
+        if status.detached or not status.head:
+            return "detached", None
+        return "known", sanitize(status.head)
+
+    def _recorded_pull(self, target):
+        task_id = (target or {}).get("task_id")
+        if not task_id or not hasattr(self, "_meta"):
             return None
-        return sanitize(status.head)
+        meta = self._meta(task_id)
+        return parse_pr_url((meta or {}).get("pr"))
+
+    def _row_slug(self, row):
+        return f"{row.get('host')}/{row.get('owner')}/{row.get('repo')}"
+
+    def _associated_pr(self):
+        """(kind, row or None, reason). kind is pr, absent, or unknown.
+
+        Authority is the agent's branch record and a recorded task pull URL, both checked against
+        that agent's repository. Titles, another agent's choice, and the rest of the open list
+        are not association.
+        """
+        target = self.target
+        if not target or target.get("kind") != "agent":
+            return "absent", None, "no agent selected"
+        project = self._agent_project()
+        if project is None:
+            return "unknown", None, "agent project is unknown"
+        state = self._pr_state(project)
+        if state == "loading":
+            return "unknown", None, "still reading pull requests"
+        if state == "error":
+            return "unknown", None, project.get("pr_error") or "could not read pull requests"
+        choice = project.get("choice")
+        slug = choice.slug if choice is not None and choice.slug else None
+        if state == "skipped" or not slug:
+            reason = (choice.reason if choice is not None and choice.reason else None) or project.get("pr_reason") or "repository identity unknown"
+            return "unknown", None, reason
+        rows = [row for row in project.get("pr_rows") or [] if self._row_slug(row) == slug]
+        branch_state, branch = self._branch_record()
+        recorded = self._recorded_pull(target)
+        recorded_pr = None
+        recorded_note = None
+        if recorded:
+            if recorded["slug"] != slug:
+                recorded_note = "recorded pull request is in another repository"
+            else:
+                recorded_pr = next((row for row in rows if row["number"] == recorded["number"]), None)
+                if recorded_pr is None:
+                    recorded_note = "recorded pull request is not open"
+        branch_pr = next((row for row in rows if row.get("head") == branch), None) if branch_state == "known" and branch else None
+        if branch_state == "unknown":
+            if recorded_pr is not None:
+                return "pr", recorded_pr, None
+            return "unknown", None, "still reading the branch"
+        if branch_pr and recorded_pr and tuple(branch_pr["key"]) != tuple(recorded_pr["key"]):
+            return "unknown", None, "branch and recorded pull request disagree"
+        chosen = branch_pr or recorded_pr
+        if chosen is not None:
+            return "pr", chosen, None
+        if branch_state == "detached":
+            return "absent", None, recorded_note or "no pull request for this detached checkout"
+        return "absent", None, recorded_note or "no pull request for this branch"
+
+    def _drop_unrelated_pr_diff(self):
+        self.pr_diff_open = False
+        self.pr_commit_oid = None
+        self._parked_diff["pr"] = None
+        if getattr(self, "review_source", None) == "pr":
+            self.diff_view = None
 
     def _current_pr(self):
-        """The chosen PR while it is listed; else the selected agent's branch PR; else, once
-        every project answered, the first PR of the agent's project or of the inventory."""
-        prs = self._all_prs()
-        choice = tuple(self.pr_choice) if self.pr_choice else None
-        for row in prs:
-            if tuple(row["key"]) == choice:
-                return row
-        loading = any(self._pr_state(project) == "loading" for project in self._pr_projects())
-        if choice and loading:
-            return None
-        project_key = (self.target or {}).get("project_key")
-        branch = self._target_branch()
-        if branch and project_key:
-            for row in prs:
-                if row["project_key"] == project_key and row.get("head") == branch:
-                    return row
-        if loading or not prs:
-            return None
-        return next((row for row in prs if row["project_key"] == project_key), prs[0])
+        """The pull request associated with the selected agent, or None. A saved or previously
+        chosen pull request is not reused when it is not that association."""
+        _kind, pr, reason = self._associated_pr()
+        self.pr_association = reason
+        key = tuple(pr["key"]) if pr else None
+        held = tuple(self.pr_choice) if self.pr_choice else None
+        if held != key:
+            self.pr_choice = key
+            self._drop_unrelated_pr_diff()
+        elif self.diff_view and self.diff_view.get("pr") not in (None, key):
+            self._drop_unrelated_pr_diff()
+        return pr
 
     def _choose_pr(self, row):
         if self.pr_choice is None or tuple(self.pr_choice) != tuple(row["key"]):
@@ -512,12 +595,8 @@ class PullRequestsMixin:
         self._fetch_pr_detail(row, force=False)
 
     def _open_picker(self):
-        pr = self._current_pr()
-        self._close_inline()
-        self.pr_menu = None
-        self.pr_picker = True
-        if pr:
-            self.pr_selection_key = tuple(pr["key"])
+        """There is no project-wide pull request list. Association chooses the page."""
+        self.pr_picker = False
 
     # ---- reads -----------------------------------------------------------------------
     def _pr_detail(self, pr):
@@ -651,38 +730,31 @@ class PullRequestsMixin:
 
     # ---- keys and mouse --------------------------------------------------------------
     def _pr_key(self, key):
-        """Keys of the PR tab; False lets the project-wide PR list (the picker) handle it."""
+        """Keys of the PR source. A missing association does not fall through to a project list."""
         pr = self._current_pr()
         if self.pr_menu is not None and pr:
             if self._pr_menu_key(key, pr):
                 return True
-        if self.pr_diff_open and pr and (self.diff_view or {}).get("pr") == tuple(pr["key"]) and not self.pr_picker:
+        if self.pr_diff_open and pr and (self.diff_view or {}).get("pr") == tuple(pr["key"]):
             if key == "esc":
                 self.pr_diff_open = False
                 return True
             if self._diff_key(key):
                 return True
-        if key == "ctrl-o" and not self.pr_picker:
+        if key == "ctrl-o":
             self._jump_back()
             return True
         if key == "esc":
-            if self.pr_picker:
-                self.pr_picker = False
-            elif self.pr_expanded:
+            if self.pr_expanded:
                 self.pr_expanded = set()
             return True
         if key == "." and pr:
-            self.pr_picker = False
             self._open_pr_menu()
             return True
         if key == "p":
-            if self.pr_picker:
-                self.pr_picker = False
-            else:
-                self._open_picker()
             return True
-        if self.pr_picker or pr is None:
-            return False
+        if pr is None:
+            return True
         detail = self._pr_detail(pr)
         if key in ("tab", "backtab"):
             step = -1 if key == "backtab" else 1
@@ -817,10 +889,8 @@ class PullRequestsMixin:
         name = next((span[2] for span in hit.get("spans", ()) if span[0] <= column - 1 < span[1]), None)
         if kind == "pr-head":
             if name == "selector":
-                self.pr_picker = not self.pr_picker
-                if self.pr_picker:
-                    self._open_picker()
-            elif name == "github":
+                return
+            if name == "github":
                 self._arm_browser(pr)
             elif name == "actions":
                 if self.pr_menu is not None:
@@ -1023,21 +1093,13 @@ class PullRequestsMixin:
     def _prs_body(self, plain, budget):
         pr = self._current_pr()
         if pr is None:
-            return self._pr_list_body(plain, budget, [], [])
+            reason = self.pr_association or "no pull request for the selected agent"
+            return [" " + paint(reason, MUTED_SGR, plain)], [None]
         self._fetch_pr_detail(pr)
         detail = self._pr_detail(pr)
         rows = [self._selector_row(pr, plain)]
         if self.pr_menu is not None:
             rows.extend(self._pr_menu_rows(plain))
-        if self.pr_picker:
-            return self._pr_list_body(plain, budget - len(rows), [row[0] for row in rows], [row[1] for row in rows])
-        states = [self._pr_state(project) for project in self._pr_projects()]
-        if "error" in states or "loading" in states:
-            notice = self._pr_summary() + " \u00b7 p lists every project"
-            rows.append((" " + paint(notice, "35" if "error" in states else "2", plain), {"kind": "pr-head", "spans": [(0, self.cols, "selector")]}))
-        if self.pr_choice and tuple(self.pr_choice) != tuple(pr["key"]):
-            gone = f"#{self.pr_choice[-1]} is no longer in the open PR list; showing #{pr['number']}"
-            rows.append((" " + paint(gone, "35", plain), {"kind": "pr-head", "spans": [(0, self.cols, "selector")]}))
         view = self.diff_view
         if self.pr_diff_open and view is not None and view.get("pr") == tuple(pr["key"]):
             pill = f"Commit {self.pr_commit_oid[:7]} \u25be" if self.pr_commit_oid else "Whole PR \u25be"
@@ -1069,22 +1131,19 @@ class PullRequestsMixin:
         return self._tree_lines(self._rows(), max(1, budget), lines, hits, plain)
 
     def _selector_row(self, pr, plain):
-        """`[ #n · title ▾ ]` (opens the PR list), then `[ GitHub ↗ ]  [ PR actions ▾ ]`."""
+        """`[ #n · title ]`, then `[ GitHub ↗ ]  [ PR actions ▾ ]`. Not a list of other pull requests."""
         detail = self._pr_detail(pr)
         title = ((detail or {}).get("view") or {}).get("title") or pr["title"]
-        project = self._project(pr["project_key"])
         number = f"#{pr['number']}"
         label = f"{number} \u00b7 {title}"
-        if project and project["key"] != (self.target or {}).get("project_key"):
-            label = f"{project['label']} \u00b7 " + label
-        mark = "\u25b4" if self.pr_picker else "\u25be"
         wide = self.cols >= 72
         github = "[ GitHub \u2197 ]" if wide else "[ \u2197 ]"
         actions = "[ PR actions \u25be ]" if wide else "[ \u22ef ]"
         right = github + "  " + actions + " "
         room = max(4, self.cols - width(right) - 8)
         shown = label if width(label) <= room else fit(label, room - 1) + "\u2026"
-        left_width = 3 + width(shown) + 4
+        left = "[ " + shown + " ]"
+        left_width = 1 + width(left)
         gap = " " * max(1, self.cols - left_width - width(right))
         start = left_width + len(gap)
         spans = [
@@ -1093,7 +1152,6 @@ class PullRequestsMixin:
             (start + width(github) + 2, start + width(github) + 2 + width(actions), "actions"),
         ]
         self._pr_menu_at = max(3, min(spans[2][0], self.cols - 24))
-        left = "[ " + shown + " " + mark + " ]"
         text = " " + paint(left, CHIP, plain) + gap + paint(github, CHIP, plain) + "  " + paint(actions, CHIP, plain) + " "
         return fit(text, self.cols), {"kind": "pr-head", "spans": spans}
 

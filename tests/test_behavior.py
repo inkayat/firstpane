@@ -913,6 +913,7 @@ class PullRequestTests(AppFixture):
             herdr_tab_id="w1:t1",
             herdr_pane_id="w1:p1",
             endpoint_task_id="alpha-task",
+            pr="https://github.com/acme/widgets/pull/3",
         )
         row = pane(cwd="/repos/alpha", foreground_cwd="/repos/alpha")
         self.row = row
@@ -974,6 +975,9 @@ class PullRequestTests(AppFixture):
 
     def expand_prs(self, app):
         app.refresh(manual=True)
+        app.handle_key("1")
+        self.select_line(app, "Alpha task")
+        app.handle_key("enter")
         (app.handle_key("2"), None if app.review_source == "pr" else app.handle_key("\\"))
 
     def test_gh_is_not_called_until_the_tab_opens_and_listing_targets_origin(self):
@@ -982,7 +986,6 @@ class PullRequestTests(AppFixture):
         app.refresh(manual=True)
         self.assertEqual(self.gh_calls(), [])
         self.expand_prs(app)
-        app.handle_key("p")
         lists = [call for call in self.gh_calls() if "list" in call["argv"]]
         self.assertEqual(len(lists), 1)
         argv = lists[0]["argv"]
@@ -994,13 +997,11 @@ class PullRequestTests(AppFixture):
         self.assertTrue(gh_env_ok(lists[0]))
         self.assertLessEqual(lists[0]["timeout"], 10)
         visible = strip_sgr(app.render())
-        self.assertIn("querying origin acme/widgets", visible)
-        self.assertIn("upstream fork/widgets", visible)
         self.assertIn("#3", visible)
-        self.assertIn("draft", visible)
+        self.assertNotIn("#1", visible)
+        self.assertIn("Draft", visible)
         self.assertIn("checks unknown", visible)
         self.assertIn("review unknown", visible)
-        self.assertIn("+more", visible)
         self.assertNotIn("#21", visible)
         self.assertNotIn("\x1b]", app.render())
         self.assertNotIn("PWN", app.render())
@@ -1019,14 +1020,11 @@ class PullRequestTests(AppFixture):
         self.expand_prs(app)
         self.assertFalse(any("diff" in call["argv"] for call in self.gh_calls()))
         views = [call["argv"] for call in self.gh_calls() if "view" in call["argv"]]
-        self.assertEqual([argv[argv.index("view") + 1] for argv in views], ["1"])
-        app.handle_key("p")
-        self.select_line(app, "#3")
-        app.handle_key("enter")
+        self.assertEqual([argv[argv.index("view") + 1] for argv in views], ["3"])
         views = [call for call in self.gh_calls() if "view" in call["argv"]]
-        self.assertEqual([call["argv"][call["argv"].index("view") + 1] for call in views], ["1", "3"])
-        self.assertIn("-R", views[1]["argv"])
-        self.assertIn("github.com/acme/widgets", views[1]["argv"])
+        self.assertEqual([call["argv"][call["argv"].index("view") + 1] for call in views], ["3"])
+        self.assertIn("-R", views[0]["argv"])
+        self.assertIn("github.com/acme/widgets", views[0]["argv"])
         self.assertFalse(app.pr_picker)
         app.handle_key(".")
         self.select_menu(app, "Description")
@@ -1246,6 +1244,7 @@ class PullRequestTests(AppFixture):
         write_meta(
             self.tool, "alpha-task", project="/repos/alpha", herdr_session="lab", herdr_workspace_id="w1",
             herdr_tab_id="w1:t1", herdr_pane_id="w1:p1", endpoint_task_id="alpha-task",
+            pr="https://github.com/acme/widgets/pull/3",
         )
         app = self.app()
         self.expand_prs(app)
@@ -1370,6 +1369,8 @@ class PullRequestTests(AppFixture):
 
         def handle(call):
             argv = call["argv"]
+            if argv[0] == "git" and "status" in argv:
+                return CmdResult(0, "# branch.head fm/alpha-task\0")
             if argv[:1] == ["git"]:
                 return CmdResult(0, "origin\tgit@ghe.example.com:acme/widgets.git (fetch)\n")
             if argv[0] == "gh" and "list" in argv:
@@ -1380,9 +1381,13 @@ class PullRequestTests(AppFixture):
             return CmdResult(127, "", "no")
 
         self.transport.handlers[:] = [(lambda argv: True, handle)]
+        write_meta(
+            self.home, "alpha-task", project="/repos/alpha", herdr_session="lab",
+            herdr_workspace_id="w1", herdr_tab_id="w1:t1", herdr_pane_id="w1:p1",
+            endpoint_task_id="alpha-task", pr="https://ghe.example.com/acme/widgets/pull/3",
+        )
         app = self.app()
         self.expand_prs(app)
-        app.handle_key("j")
         app.handle_key("c")
         self.assertIn("@unknown", strip_sgr(app.render()))
         app.handle_key("esc")
@@ -1409,7 +1414,7 @@ class PullRequestTests(AppFixture):
         fetches = [(fn, fut) for fn, fut in pending if getattr(fn, "__name__", "") != "_load_board"]
         self.assertEqual(len(fetches), 1)
         loading = strip_sgr(app.render())
-        self.assertIn("loading", loading)
+        self.assertIn("still reading pull requests", loading)
         self.assertNotIn("#3", loading)
         app.handle_key("k")
         app.refresh(manual=True)
@@ -1418,7 +1423,8 @@ class PullRequestTests(AppFixture):
         fn, future = fetches[0]
         future.set_result(fn())
         landed = strip_sgr(app.render())
-        self.assertIn("#1 \u00b7 Title 1", landed)
+        self.assertIn("#3", landed)
+        self.assertNotIn("#1 \u00b7 Title 1", landed)
         self.assertIn("loading pull request", landed)
         self.assertNotIn("projects checked", landed)
         self.assertEqual(len([call for call in self.gh_calls() if "list" in call["argv"]]), 1)
@@ -1473,8 +1479,8 @@ class InventoryTests(AppFixture):
 
         self.transport.handlers.append((lambda argv: True, handle))
 
-    def test_projects_without_agents_are_only_on_the_pull_requests_tab_and_only_with_open_prs(self):
-        # Break: the Agents tab lists agent-less projects, or the PR tab lists a project with no open PR.
+    def test_projects_without_agents_are_not_a_pull_request_inventory(self):
+        # Break: the Agents tab lists agent-less projects, or Review lists their open pull requests.
         app = self.app()
         app.refresh(manual=True)
         visible = strip_sgr(app.render())
@@ -1485,24 +1491,9 @@ class InventoryTests(AppFixture):
         (app.handle_key("2"), None if app.review_source == "pr" else app.handle_key("\\"))
         app.handle_key("p")
         visible = strip_sgr(app.render())
-        self.assertIn("\u25be beta", visible)
-        self.assertIn("#7", visible)
-        self.assertNotIn("alpha", visible)
-        self.assertNotIn("notes", visible)
-        self.assertNotIn("hidden", visible)
-        lists = [call for call in self.gh_calls() if "list" in call["argv"]]
-        self.assertEqual(sorted(call["argv"][call["argv"].index("-R") + 1] for call in lists), ["github.com/acme/alpha", "github.com/acme/beta"])
-
-    def test_allowlist_replaces_the_root_inventory(self):
-        # Break: an allowlisted view still lists every project under the root.
-        self.config.project_allowlist = (str(self.projects / "beta"),)
-        app = self.app()
-        app.refresh(manual=True)
-        (app.handle_key("2"), None if app.review_source == "pr" else app.handle_key("\\"))
-        visible = strip_sgr(app.render())
-        self.assertIn("beta", visible)
-        self.assertNotIn("alpha", visible)
-        self.assertEqual(len([call for call in self.gh_calls() if "list" in call["argv"]]), 1)
+        self.assertIn("no agent selected", visible)
+        self.assertNotIn("#7", visible)
+        self.assertEqual(self.gh_calls(), [])
 
     def test_generic_mode_honors_project_root_in_the_same_layout(self):
         # Break: without a FirstMate home the root is ignored and a second layout is drawn.
@@ -1536,28 +1527,25 @@ class InventoryTests(AppFixture):
         self.assertNotIn("not an assignment", visible)
         self.assertNotIn("Pull requests", visible)
 
-    def test_allowlist_with_a_home_relative_path_joins_the_pr_inventory(self):
-        # Break: a ~/ allowlist entry is tested against the process cwd and never listed.
+    def test_a_home_relative_allowlist_does_not_invent_a_pull_request_list(self):
+        # Break: Review lists projects from a ~/ allowlist when no agent is selected.
         self.config.project_allowlist = ("~/projects/beta",)
         with mock.patch.dict(os.environ, {"HOME": str(self.root)}):
             app = self.app()
             app.refresh(manual=True)
         (app.handle_key("2"), None if app.review_source == "pr" else app.handle_key("\\"))
-        app.handle_key("p")
         visible = strip_sgr(app.render())
-        self.assertIn("\u25be beta", visible)
-        self.assertNotIn("alpha", visible)
+        self.assertIn("no agent selected", visible)
+        self.assertNotIn("#7", visible)
 
-    def test_two_projects_sharing_a_remote_have_selectable_pull_requests(self):
-        # Break: both clones emit the same PR key, so a click on the second reports a stale target.
+    def test_two_projects_sharing_a_remote_are_not_a_pull_request_menu(self):
+        # Break: Review offers both clones' pull requests when no agent is selected.
         def handle(call):
             argv = call["argv"]
             if argv[:2] == ["git", "-C"]:
                 return CmdResult(0, "origin\tgit@github.com:acme/shared.git (fetch)\n")
             if argv[:1] == ["gh"] and "list" in argv:
                 return CmdResult(0, json.dumps([{"number": 7, "title": "Shared", "isDraft": False}]))
-            if argv[:1] == ["gh"] and "view" in argv:
-                return CmdResult(0, json.dumps({"title": "Shared", "body": "DETAIL_BODY", "author": {"login": "a"}}))
             return CmdResult(127, "", "no")
 
         self.transport.handlers[:] = [(lambda argv: True, handle)]
@@ -1565,19 +1553,10 @@ class InventoryTests(AppFixture):
         app.refresh(manual=True)
         (app.handle_key("2"), None if app.review_source == "pr" else app.handle_key("\\"))
         app.handle_key("p")
-        app.render()
-        prs = [index for index, row in enumerate(app.hit_rows, start=1) if row and row["kind"] == "pr"]
-        self.assertEqual(len(prs), 2)
-        self.assertEqual(len({row["key"] for row in app.hit_rows if row and row["kind"] == "pr"}), 2)
-        clicked = app.hit_rows[prs[1] - 1]
-        app.handle_bytes(f"\x1b[<0;1;{prs[1]}M")
-        self.assertNotIn("stale", app.status)
-        self.assertEqual(app.pr_choice, clicked["key"])
-        self.assertEqual(app._current_pr()["project_key"], clicked["project_key"])
-        views = [call for call in self.gh_calls() if "view" in call["argv"]]
-        self.assertEqual(views[-1]["argv"][views[-1]["argv"].index("view") + 1], "7")
-        self.assertIn(clicked["project_key"].rsplit("/", 1)[1] + " \u00b7 #7", strip_sgr(app.render()))
-
+        visible = strip_sgr(app.render())
+        self.assertIn("no agent selected", visible)
+        self.assertNotIn("#7", visible)
+        self.assertFalse(any(row and row.get("kind") == "pr" for row in app.hit_rows))
 
 class GenericTests(AppFixture):
     def test_no_home_groups_worktrees_same_names_and_other(self):

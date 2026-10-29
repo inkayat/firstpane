@@ -311,9 +311,9 @@ class MessageBlockTests(LayoutFixture):
         self.assertIn("fp-keys-ab12 \u00b7 Keyboard shortcuts", lines[label + 1])
         self.assertIn("Write about the selected task", lines[label + 2])
         self.assertIn("Send \u21b5", lines[label + 2])
-        self.assertIn("press Enter there", lines[label + 3])
-        self.assertIn("Column", lines[label + 4])
-        self.assertEqual(len(lines), label + 5)
+        self.assertIn("queues this for FirstMate", lines[label + 3])
+        self.assertNotIn("Column", lines[label + 4] if label + 4 < len(lines) else "")
+        self.assertLess(len(lines), label + 6)
         self.assertIn("fp-keys-ab12 \u00b7 Keyboard shortcuts", lines[label - 3])
         app.handle_key("right")
         app.handle_key("down")
@@ -363,8 +363,7 @@ class MessageBlockTests(LayoutFixture):
         self.assertEqual(app.screen, "tree")
         self.type(app, "ready")
         self.click(app, "Send \u21b5")
-        self.assertEqual(app.screen, "tree")
-        self.assertIn("not transferred", app.status)
+        self.assertEqual(app.screen, "confirm-send")
         self.assertEqual(app.composer.text, "ready")
         self.assertEqual(self.writers(), [])
 
@@ -384,30 +383,35 @@ class MessageBlockTests(LayoutFixture):
         self.assertEqual(app.composer.text, "ready")
         self.click(app, "Send \u21b5")
         app.handle_key("y")
-        self.assertEqual(len(primary.received), 1)
-        self.assertIn("ready", primary.received[0])
+        self.assertEqual(primary.received, [])
         self.assertEqual(primary.submitted, [])
+        notes = [call for call in self.transport.calls if call["argv"] and str(call["argv"][0]).endswith("fm-inbox.sh")]
+        self.assertEqual(len(notes), 1)
+        self.assertIn("ready", notes[0]["stdin"])
+        self.assertIn("queued for FirstMate", app.status)
         self.assertEqual(app.focus, "list")
         self.assertEqual(self.writers(), [])
 
-    def refused_send(self, **kwargs):
+    def queued_without_paste(self, **kwargs):
         primary = FakePi(self.transport, self.home, **kwargs)
         app = self.board()
         app.handle_key("tab")
         self.type(app, "ready")
         self.click(app, "Send \u21b5")
-        self.assertEqual(app.screen, "tree")
-        self.assertIn("not transferred", app.status)
+        self.assertEqual(app.screen, "confirm-send")
+        app.handle_key("y")
         self.assertEqual(primary.received, [])
-        self.assertEqual(app.composer.text, "ready")
+        self.assertEqual(primary.text, kwargs.get("text", ""))
+        self.assertIn("queued for FirstMate", app.status)
+        self.assertEqual(app.composer.text, "")
 
-    def test_a_busy_firstmate_refuses_and_nothing_is_pasted(self):
-        # Break: the message is pasted into an agent that is mid-turn.
-        self.refused_send(status="working")
+    def test_a_busy_firstmate_queues_and_nothing_is_pasted(self):
+        # Break: a working FirstMate refuses the confirmed send, or the text is pasted into its box.
+        self.queued_without_paste(status="working")
 
-    def test_an_occupied_message_box_refuses_and_nothing_is_pasted(self):
-        # Break: the message is pasted over text the captain was typing in FirstMate.
-        self.refused_send(text="half a thought")
+    def test_an_occupied_message_box_is_not_overwritten(self):
+        # Break: the confirmed send pastes over text the captain was typing in FirstMate.
+        self.queued_without_paste(text="half a thought")
 
     def test_no_new_task_control_exists_and_the_message_block_degrades_in_a_short_pane(self):
         # Break: a short pane drops the field the status messages explain, or a new-task control appears.
@@ -447,9 +451,8 @@ class UnconfirmedTransferTests(LayoutFixture):
         self.click(app, "Send \u21b5")
         self.assertEqual(app.screen, "confirm-send")
         app.handle_key("y")
-        self.assertTrue(app.status.startswith("transfer unconfirmed"), app.status)
+        self.assertIn("queued for FirstMate", app.status)
+        self.assertEqual(primary.received, [])
+        self.assertEqual(primary.text, "")
         self.assertEqual(app.screen, "tree")
-        self.assertEqual(app.composer.text, "ready")
-        self.assertEqual(app.draft["outcome"], "unconfirmed")
-        self.assertIn("fp-keys-ab12 \u00b7 Keyboard shortcuts \u00d7", self.text(app))
-        self.assertIn("last send: unconfirmed", self.text(app))
+        self.assertNotEqual(app.composer.text, "ready")

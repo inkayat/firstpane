@@ -119,6 +119,7 @@ class ReviewFixture(AppFixture):
         self.threads_fail = False
         self.view_fail = False
         self.resolve_answer = None
+        self.branch_head = "fm/other"
         self.transport.handlers.append((lambda argv: True, self.handle))
 
     def handle(self, call):
@@ -128,9 +129,13 @@ class ReviewFixture(AppFixture):
         if argv[:1] == ["git"] and "--show-toplevel" in argv:
             return CmdResult(0, f"{self.worktree}\n{self.projects / 'alpha' / '.git'}\n")
         if argv[:1] == ["git"] and "status" in argv:
-            return CmdResult(0, "# branch.oid 0123456789abcdef0123456789abcdef01234567\0# branch.head fm/alpha-task\0")
+            return CmdResult(0, "# branch.oid 0123456789abcdef0123456789abcdef01234567\0# branch.head " + self.branch_head + "\0")
         if argv[:1] == ["gh"] and "list" in argv:
-            return CmdResult(0, json.dumps(self.lists[argv[argv.index("-R") + 1].rsplit("/", 1)[1]]))
+            name = argv[argv.index("-R") + 1].rsplit("/", 1)[1]
+            listed = self.lists.get(name)
+            if listed is None:
+                return CmdResult(1, "", "HTTP 502")
+            return CmdResult(0, json.dumps(listed))
         if argv[:1] == ["gh"] and "view" in argv:
             if self.view_fail:
                 return CmdResult(1, "", "HTTP 502")
@@ -164,6 +169,12 @@ class ReviewFixture(AppFixture):
         kwargs.setdefault("wall", lambda: NOW)
         app = super().app(**kwargs)
         app.refresh(manual=True)
+        app.handle_key("1")
+        try:
+            self.select_line(app, "Alpha task")
+            app.handle_key("enter")
+        except AssertionError:
+            pass
         (app.handle_key("2"), None if app.review_source == "pr" else app.handle_key("\\"))
         return app
 
@@ -180,6 +191,100 @@ class ReviewFixture(AppFixture):
         return [call for call in self.gh_calls() if any(part.startswith("threadId=") for part in call["argv"])]
 
 
+class AssociatedPullRequestTests(ReviewFixture):
+    def test_same_repository_unrelated_pr_is_not_shown(self):
+        # Break: Review shows another open pull request in the same repository, or the first one.
+        self.branch_head = "fm/alpha-task"
+        app = self.app()
+        text = self.text(app)
+        self.assertIn("#9", text)
+        self.assertIn("Agent branch work", text)
+        self.assertNotIn("Sidebar status", text)
+        self.assertNotIn("#7", text)
+        self.assertNotIn("#12", text)
+        self.assertNotIn("beta", text.lower())
+
+    def test_a_recorded_task_url_associates_when_the_branch_does_not(self):
+        # Break: a recorded pull URL is ignored, or a same-repository title match is used instead.
+        self.branch_head = "fm/no-such-branch"
+        write_meta(
+            self.home, "alpha-task", project=str(self.projects / "alpha"), herdr_session="lab",
+            herdr_workspace_id="w1", herdr_tab_id="w1:t1", herdr_pane_id="w1:p1", endpoint_task_id="alpha-task",
+            worktree=str(self.worktree), pr="https://github.com/acme/alpha/pull/7",
+        )
+        app = self.app()
+        text = self.text(app)
+        self.assertIn("#7", text)
+        self.assertIn("Sidebar status", text)
+        self.assertNotIn("#9", text)
+        self.assertNotIn("#12", text)
+
+    def test_a_known_branch_with_no_matching_pr_is_absence_not_another_pr(self):
+        # Break: no matching pull request falls back to the first open one in the repository.
+        self.branch_head = "fm/no-such-branch"
+        app = self.app()
+        text = self.text(app)
+        self.assertIn("no pull request for this branch", text)
+        self.assertNotIn("Sidebar status", text)
+        self.assertNotIn("#12", text)
+        self.assertNotIn("Beta cleanup", text)
+
+    def test_a_failed_pull_request_read_stays_unknown(self):
+        # Break: a failed gh list is reported as no pull request, or another project's PR is shown.
+        self.lists["alpha"] = None
+        app = self.app()
+        text = self.text(app)
+        self.assertIn("PRs unavailable: gh failed", text)
+        self.assertNotIn("no pull request for this branch", text)
+        self.assertNotIn("#12", text)
+
+    def test_switching_agents_does_not_keep_the_previous_pull_request(self):
+        # Break: the previous agent's pull request or diff stays up after the selection changes.
+        self.branch_head = "fm/alpha-task"
+        beta = self.projects / "beta"
+        write_meta(
+            self.home, "beta-task", project=str(beta), herdr_session="lab",
+            herdr_workspace_id="w2", herdr_tab_id="w2:t1", herdr_pane_id="w2:p1", endpoint_task_id="beta-task",
+            worktree=str(self.worktree),
+        )
+        row = pane(pane_id="w2:p1", terminal_id="term_b", workspace_id="w2", tab_id="w2:t1", cwd=str(self.worktree))
+        self.transport.snapshot = snapshot(
+            [workspace("w1", "alpha"), workspace("w2", "beta", number=2)],
+            [self.transport.snapshot["panes"][0], row],
+            [agent_for(self.transport.snapshot["panes"][0]), agent_for(row, name="beta")],
+        )
+        self.transport.pane_get["w2:p1"] = dict(row)
+        app = self.app()
+        self.assertIn("#9", self.text(app))
+        app.handle_key("d")
+        self.assertTrue(app.pr_diff_open)
+        app.handle_key("1")
+        self.select_line(app, "Beta task")
+        app.handle_key("enter")
+        app.handle_key("2")
+        if app.review_source != "pr":
+            app.handle_key("\\")
+        text = self.text(app)
+        self.assertNotIn("Agent branch work", text)
+        self.assertNotIn("Sidebar status", text)
+        self.assertFalse(app.pr_diff_open)
+        self.assertNotIn("SIDEBAR_LINE", text)
+
+    def test_a_saved_unrelated_choice_is_not_restored(self):
+        # Break: a pull request chosen for another agent is still the page on the next render.
+        self.branch_head = "fm/alpha-task"
+        app = self.app()
+        app.pr_choice = ("pr", "other-project", "github.com", "acme", "beta", 12)
+        app.pr_diff_open = True
+        app.diff_view = {"pr": app.pr_choice, "lines": []}
+        text = self.text(app)
+        self.assertIn("#9", text)
+        self.assertNotIn("#12", text)
+        self.assertNotIn("Beta cleanup", text)
+        self.assertEqual(app.pr_choice[-1], 9)
+        self.assertFalse(app.pr_diff_open)
+
+
 class ReviewPageTests(ReviewFixture):
     def test_the_page_shows_the_selected_prs_facts_and_its_open_conversation(self):
         # Break: the page shows invented or another PR's facts, drops the check progress or
@@ -188,7 +293,9 @@ class ReviewPageTests(ReviewFixture):
         app = self.app()
         text = self.text(app)
         lines = text.splitlines()
-        self.assertIn("[ alpha \u00b7 #7 \u00b7 Sidebar status \u25be ]", text)
+        self.assertIn("[ #7 \u00b7 Sidebar status ]", text)
+        self.assertNotIn("#12", text)
+        self.assertNotIn("Beta cleanup", text)
         self.assertIn("[ GitHub \u2197 ]  [ PR actions \u25be ]", text)
         self.assertIn("[ \u25cb Open ]   fm/other \u2192 main   2 files \u00b7 +28 -9", text)
         self.assertIn("Checks 2/3 passing \u00b7 1 pending", text)
@@ -316,30 +423,21 @@ class ReviewPageTests(ReviewFixture):
         app.handle_key("backtab")
         self.assertEqual(app.pr_section, "comments")
 
-    def test_the_selector_lists_every_projects_prs_and_keeps_the_selected_agent(self):
-        # Break: the page drops project-wide PR access, picks the first PR instead of the
-        # selected agent's branch PR, or choosing a PR retargets the agent.
+    def test_the_page_does_not_open_a_project_wide_pull_request_list(self):
+        # Break: the selector opens every project's pull requests, or choosing one retargets the agent.
         app = self.app()
-        app.handle_key("1")
-        self.select_line(app, "Alpha task")
-        app.handle_key("enter")
         target = dict(app.target)
-        (app.handle_key("2"), None if app.review_source == "pr" else app.handle_key("\\"))
-        self.assertIn("[ #9 \u00b7 Agent branch work \u25be ]", self.text(app))
-        self.click(app, "[ #9", "#9")
-        self.assertTrue(app.pr_picker)
-        text = self.text(app)
-        self.assertIn("\u25be alpha", text)
-        self.assertIn("\u25be beta", text)
-        self.assertIn("#12", text)
-        self.select_line(app, "#12")
-        app.handle_key("enter")
+        self.click(app, "[ #7", "#7")
         self.assertFalse(app.pr_picker)
-        self.assertIn("[ beta \u00b7 #12 \u00b7 Beta cleanup \u25be ]", self.text(app))
+        text = self.text(app)
+        self.assertNotIn("#12", text)
+        self.assertNotIn("Beta cleanup", text)
+        self.assertNotIn("\u25be beta", text)
         self.assertEqual(app.target, target)
-        self.assertIn("alpha / alpha-task", self.text(app).splitlines()[1])
-        restarted = self.app()
-        self.assertIn("#12 \u00b7 Beta cleanup", self.text(restarted))
+        self.assertIn("alpha / alpha-task", text.splitlines()[1])
+        lists = [call for call in self.gh_calls() if "list" in call["argv"]]
+        repos = {call["argv"][call["argv"].index("-R") + 1] for call in lists}
+        self.assertEqual(repos, {"github.com/acme/alpha"})
 
     def test_the_actions_menu_reuses_the_existing_guarded_pr_actions(self):
         # Break: a menu item or the GitHub button acts without its existing confirm.
@@ -392,10 +490,11 @@ class AddToFirstMateTests(ReviewFixture):
         for line in body.splitlines():
             self.assertIn(line[:60], preview)
         app.handle_key("y")
-        self.assertEqual(self.inbox_calls(), [])
-        self.assertEqual(self.main.received, ["\x1b[200~" + body.rstrip("\n") + "\x1b[201~"])
+        self.assertEqual(self.main.received, [])
         self.assertEqual(self.main.submitted, [])
-        self.assertIn("press Enter there to send", self.text(app))
+        self.assertEqual(len(self.inbox_calls()), 1)
+        self.assertIn(body.rstrip("\n"), self.inbox_calls()[0]["stdin"])
+        self.assertIn("queued for FirstMate; not processed yet", self.text(app))
 
     def test_a_conversation_that_changed_is_flagged_on_the_preview(self):
         # Break: the preview hides that the conversation got a new reply or was resolved
@@ -420,7 +519,7 @@ class AddToFirstMateTests(ReviewFixture):
         app = self.app()
         app.handle_key("m")
         self.assertNotEqual(app.focus, "composer")
-        self.assertIn("FirstMate not configured", self.text(app))
+        self.assertNotEqual(app.screen, "confirm-send")
 
     def test_the_agents_field_and_the_conversation_message_stay_on_their_own_tabs(self):
         # Break: the Agents message field stays focused after switching tabs and swallows the
@@ -443,7 +542,7 @@ class AddToFirstMateTests(ReviewFixture):
         app.handle_key("backtab")
         app.handle_key("m")
         text = self.text(app)
-        self.assertIn("#9 app/sidebar.py:39-40", text)
+        self.assertIn("#7 app/sidebar.py:39-40", text)
         self.assertNotIn("agent field text", text)
         app.handle_key("esc")
         app.handle_key("1")

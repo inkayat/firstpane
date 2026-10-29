@@ -22,7 +22,7 @@ from firstpane.app import App
 from firstpane.config import Config
 from firstpane.transport import LiveTransport
 from tests.gitfixture import git_env
-from tests.support import Clock, FakePi, FakeTerminal, FakeTransport, agent_for, pane, selected_line, snapshot, strip_sgr, workspace, write_meta
+from tests.support import Clock, CmdResult, FakePi, FakeTerminal, FakeTransport, agent_for, note_json, pane, selected_line, snapshot, strip_sgr, workspace, write_meta
 
 HEADER = re.compile(r"[\u25be\u25b8] (\S+)\s+(\d+) agents?\s*$")
 
@@ -55,8 +55,15 @@ class PrivateSourceTests(unittest.TestCase):
         self.rows = []
         self.agents = []
         self.workspaces = []
-        self.config = Config(firstmate_home=str(self.home), socket_path="/Users/x/.config/herdr/sessions/lab/herdr.sock",
-                             herdr_pane_id="w0:p1")
+        self.tool = self.root / "fm-tool"
+        (self.tool / "bin").mkdir(parents=True)
+        (self.tool / "bin" / "fm-inbox.sh").write_text("#!/bin/sh\nexit 0\n")
+        self.transport.handlers.append((
+            lambda argv: argv and str(argv[0]).endswith("fm-inbox.sh"),
+            lambda call: CmdResult(0, note_json("created")),
+        ))
+        self.config = Config(firstmate_home=str(self.home), firstmate_root=str(self.tool),
+                             socket_path="/Users/x/.config/herdr/sessions/lab/herdr.sock", herdr_pane_id="w0:p1")
 
     def git(self, cwd, *args):
         subprocess.run(["git", *args], cwd=str(cwd), env=self.env, check=True, capture_output=True, stdin=subprocess.DEVNULL)
@@ -173,9 +180,9 @@ class PrivateSourceTests(unittest.TestCase):
         source, wt = self.private(self.home, "beta-pool", "fm/beta-task", name="alpha")
         self.report("beta-task", source, wt, number=2)
         app, with_clone = self.pull_requests()
-        self.assertEqual(with_clone[0], without[0])
         self.assertEqual(with_clone[1], without[1])
-        self.assertTrue({str(self.alpha), str(self.home / "projects" / "other")} <= without[1])
+        self.assertEqual(without[1], set())
+        self.assertNotIn("beta-pool", with_clone[0])
         app.handle_key("1")
         self.assertIn(humanize("beta-task"), strip_sgr(app.render()))
 
@@ -340,7 +347,9 @@ class PrivateSourceTests(unittest.TestCase):
         app.handle_bytes("kontrol et".encode())
         app.handle_key("enter")
         app.handle_key("y")
-        body = main.received[-1]
+        notes = [call for call in self.transport.calls if call["argv"] and str(call["argv"][0]).endswith("fm-inbox.sh")]
+        self.assertEqual(main.received, [])
+        body = notes[-1]["stdin"]
         self.assertIn(f"project: alpha  {two}\n", body)
         self.assertIn("agent: alpha-two  alpha-two-agent  pane w3:p1  terminal term_alpha-two\n", body)
         self.assertIn(f"workspace: {two_wt}  (fm)\n", body)
@@ -390,15 +399,15 @@ class PrivateSourceTests(unittest.TestCase):
         app.handle_key("j")  # -> beta's agent
         text = changes()
         self.assertIn("beta / claude", text.splitlines()[1])
-        self.assertIn(str(trees["beta"].name), text.splitlines()[2])
         self.assertIn("beta-only.txt", text)
+        self.assertNotIn(str(trees["alpha"].name), text.splitlines()[1])
         self.assertNotIn("alpha-only.txt", text)
         app.handle_key("k")  # -> beta's heading: beta's agent stays selected
         self.assertIn("beta / claude", changes().splitlines()[1])
         app.handle_key("k")  # -> alpha's agent
         text = changes()
         self.assertIn("alpha / claude", text.splitlines()[1])
-        self.assertIn(str(trees["alpha"].name), text.splitlines()[2])
+        self.assertIn("alpha-only.txt", text)
         self.assertIn("alpha-only.txt", text)
         self.assertNotIn("beta-only.txt", text)
 

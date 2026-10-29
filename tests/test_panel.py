@@ -296,14 +296,15 @@ class LayoutTests(PanelFixture):
         lines = plain(app.render()).splitlines()
         self.assertIn("/ alpha-task", lines[1])
         self.assertIn("fm/alpha-task (no upstream)", lines[1])
-        self.assertIn("idle \u00b7 2 files", lines[2])
-        self.assertIn("wt-a (fm)", lines[2])
+        self.assertNotIn("wt-a (fm)", "\n".join(lines[:6]))
+        self.assertNotIn("idle \u00b7 2 files", lines[2] if len(lines) > 2 else "")
         app.handle_key("1")
         self.select(app, "beta-task")
         app.handle_key("2")
         lines = plain(app.render()).splitlines()
         self.assertIn("/ beta-task", lines[1])
-        self.assertIn("working \u00b7 0 files", lines[2])
+        self.assertIn("/ beta-task", lines[1])
+        self.assertNotIn("working \u00b7 0 files", lines[2] if len(lines) > 2 else "")
 
     def test_enter_selects_in_the_panel_and_g_focuses(self):
         # Break: Enter on an agent leaves Firstpane (pane.focus) instead of selecting it.
@@ -362,16 +363,14 @@ class CursorSelectionTests(PanelFixture):
         lines = frame.splitlines()
         self.assertIn("/ beta-task", lines[1])
         self.assertIn("fm/beta-task", lines[1])
-        self.assertIn("working \u00b7 1 file", lines[2])
-        self.assertIn("wt-b", lines[2])
-        self.assertNotIn("wt-a", lines[2])
+        self.assertNotIn("wt-a", lines[1])
         self.assertIn("beta-only.txt", frame)
         self.assertNotIn("alpha-only.txt", frame)
         app.handle_key("k")
         frame = self.changes(app)
         lines = frame.splitlines()
         self.assertIn("/ alpha-task", lines[1])
-        self.assertIn("wt-a (fm)", lines[2])
+        self.assertNotIn("wt-b", lines[1])
         self.assertIn("alpha-only.txt", frame)
         self.assertNotIn("beta-only.txt", frame)
         self.assertEqual(self.transport.socket_calls[calls:], [])
@@ -434,9 +433,9 @@ class ChangesTests(PanelFixture):
         self.open_changes(app)
         lines = self.lines(app)
         frame = "\n".join(lines)
-        self.assertIn("README.md \u25be", lines[5])
-        self.assertIn("1 / 2", lines[5])
-        self.assertIn("+2 -1  unstaged", lines[6])
+        self.assertIn("README.md \u25be", lines[4])
+        self.assertIn("1 / 2", lines[4])
+        self.assertIn("+2 -1  unstaged", lines[5])
         colored = app.render()
         self.assertIn("48;2;28;62;42", colored)
         self.assertTrue("48;2;72;30;42" in colored or "48;2;88;36;48" in colored)
@@ -469,20 +468,20 @@ class ChangesTests(PanelFixture):
         self.fx.git(self.wt_a, "add", "staged.txt")
         app = self.app()
         self.open_changes(app)
-        self.assertIn("1 / 3", self.lines(app)[5])
+        self.assertIn("1 / 3", self.lines(app)[4])
         self.click_text(app, "Uncommitted \u25be")
         self.click_text(app, "Staged")
         lines = self.lines(app)
-        self.assertIn("staged.txt \u25be", lines[5])
-        self.assertIn("1 / 1", lines[5])
-        self.assertIn("Uncommitted \u00b7 staged \u25be", lines[5])
+        self.assertIn("staged.txt \u25be", lines[4])
+        self.assertIn("1 / 1", lines[4])
+        self.assertIn("Uncommitted \u00b7 staged \u25be", lines[4])
         self.click_text(app, "Unstage file")
         self.assertIn("git restore --staged -- staged.txt", plain(app.render()))
         app.handle_key("n")
         self.click_text(app, "Uncommitted \u00b7 staged \u25be")
         self.click_text(app, "All changes")
         self.pick_file(app, "new.txt")
-        self.assertIn("new.txt \u25be", self.lines(app)[5])
+        self.assertIn("new.txt \u25be", self.lines(app)[4])
         self.click_text(app, "Stage file")
         self.assertIn("git add -- new.txt", plain(app.render()))
         self.assertEqual(self.fx.git(self.wt_a, "diff", "--cached", "--name-only"), "staged.txt")
@@ -491,9 +490,9 @@ class ChangesTests(PanelFixture):
         self.clock.t += 20
         app.refresh(manual=True)
         lines = self.lines(app)
-        self.assertIn("new.txt \u25be", lines[5])
-        self.assertIn("staged", lines[6])
-        self.assertIn("Unstage file", lines[6])
+        self.assertIn("new.txt \u25be", lines[4])
+        self.assertIn("staged", lines[5])
+        self.assertIn("Unstage file", lines[5])
 
     def test_controls_stay_whole_and_clickable_in_narrow_panes(self):
         # Break: a narrow pane clips a control or a click lands on a neighbouring control.
@@ -526,7 +525,8 @@ class ChangesTests(PanelFixture):
         self.assertEqual(self.main.received, [])
         app.handle_key("enter")
         preview = plain(app.render())
-        self.assertIn("Put in FirstMate's message box (pane w5:p1, pi)", preview)
+        self.assertIn("Queue this for FirstMate", preview)
+        self.assertNotIn("press Enter", preview)
         head = self.fx.head(self.wt_a)
         blob = self.fx.git(self.wt_a, "hash-object", "README.md")
         expected = (
@@ -542,12 +542,52 @@ class ChangesTests(PanelFixture):
         )
         self.assertIn(expected.rstrip("\n"), preview)
         app.handle_key("y")
-        self.assertEqual(self.pasted(), [expected.rstrip("\n")])
+        self.assertEqual(self.main.received, [])
         self.assertEqual(self.main.submitted, [])
-        self.assertEqual(self.transport.inbox, [])
+        self.assertEqual(len(self.transport.inbox), 1)
+        self.assertIn(expected.rstrip("\n"), self.transport.inbox[0]["stdin"])
         frame = plain(app.render())
-        self.assertIn("in FirstMate's message box (pane w5:p1): press Enter there to send", frame)
+        self.assertIn("queued for FirstMate; not processed yet", frame)
+        self.assertEqual(self.main.received, [])
+        self.assertEqual(len(self.transport.inbox), 1)
+        self.assertIn("Bu sat\u0131r\u0131 kontrol et", self.transport.inbox[0]["stdin"])
         self.assertNotIn("Bu satırı kontrol et", frame)
+
+    def test_a_busy_firstmate_still_queues_the_confirmed_message_and_does_not_paste(self):
+        # Break: y refuses while FirstMate is working, pastes over text already in the box,
+        # or a retry of an unknown queue adds a second note.
+        self.main.pane["agent_status"] = "working"
+        self.main.text = "captain typing"
+        self.changed_readme()
+        app = self.app()
+        self.open_changes(app)
+        self.double_click(app, self.row_of(app, "+ TWO"))
+        self.type(app, "keep this literal")
+        app.handle_key("enter")
+        self.assertEqual(app.screen, "confirm-send")
+        self.assertIn("keep this literal", plain(app.render()))
+        self.assertEqual(self.main.received, [])
+        self.transport.inbox_results.append(CmdResult(0, "", "", timed_out=True))
+        app.handle_key("y")
+        self.assertEqual(self.main.received, [])
+        self.assertEqual(self.main.text, "captain typing")
+        self.assertEqual(self.main.submitted, [])
+        self.assertEqual(len(self.transport.inbox), 1)
+        first = self.transport.inbox[0]
+        self.assertEqual(first["env"].get("FM_HOME"), self.config.firstmate_home)
+        self.assertIn("--request-id", first["argv"])
+        self.assertIn("keep this literal", first["stdin"])
+        self.assertIn("queue outcome unknown", app.status)
+        self.assertEqual(app.composer.text, "keep this literal")
+        request_id = first["argv"][first["argv"].index("--request-id") + 1]
+        self.transport.inbox_results.append(CmdResult(0, note_json("replay", request_id=request_id)))
+        app.handle_key("enter")
+        app.handle_key("y")
+        self.assertEqual(len(self.transport.inbox), 2)
+        second = self.transport.inbox[1]
+        self.assertEqual(second["argv"][second["argv"].index("--request-id") + 1], request_id)
+        self.assertIn("already queued", app.status)
+        self.assertEqual(self.main.received, [])
 
     def test_a_keyboard_range_has_one_add_comment_on_its_first_line_and_the_message_carries_every_line(self):
         # Break: every selected line gets the Add comment control, it is not on the first
@@ -568,8 +608,9 @@ class ChangesTests(PanelFixture):
         app.handle_key("y")
         head = self.fx.head(self.wt_a)
         blob = self.fx.git(self.wt_a, "hash-object", "README.md")
+        self.assertEqual(self.main.received, [])
         self.assertEqual(
-            self.pasted(),
+            [self.transport.inbox[0]["stdin"].rstrip("\n")],
             [self.expected_context()
              + "\nüç satır\n\n"
              f"[1] diff README.md  unstaged  old lines 2-3  new lines 2-3  HEAD {head[:12]}  new blob {blob[:12]}\n"
@@ -826,9 +867,8 @@ class InlineMessageTests(PanelFixture):
         self.assertIn("changed since they were selected", preview)
         self.assertIn("```diff\n+TWO\n```", preview)
 
-    def test_a_busy_box_keeps_the_draft_and_a_retry_once_it_is_clear_fills_it_once(self):
-        # Break: a refusal (the captain is typing in FirstMate's box) drops the inline draft
-        # or pastes anyway, or the retry after the box is cleared pastes twice.
+    def test_a_busy_box_is_not_overwritten_and_the_message_is_queued(self):
+        # Break: y pastes over text the captain is typing, or refuses and drops the draft.
         self.main.text = "yazıyorum"
         self.changed_readme()
         app = self.app()
@@ -836,36 +876,27 @@ class InlineMessageTests(PanelFixture):
         self.double_click(app, self.row_of(app, "+ TWO"))
         self.type(app, "tekrar dene")
         app.handle_key("enter")
-        frame = plain(app.render())
-        self.assertIn("not transferred: FirstMate's message box already has text", frame)
-        self.assertIn("tekrar dene", frame)
+        self.assertEqual(app.screen, "confirm-send")
+        app.handle_key("y")
         self.assertEqual(self.main.received, [])
-        self.main.text = ""
-        self.keys(app, "enter", "y")
-        self.assertEqual(len(self.main.received), 1)
-        self.assertIn("tekrar dene", self.pasted()[0])
-        frame = plain(app.render())
-        self.assertIn("press Enter there to send", frame)
-        self.assertNotIn("tekrar dene", frame)
+        self.assertEqual(self.main.text, "yazıyorum")
+        self.assertEqual(len(self.transport.inbox), 1)
+        self.assertIn("tekrar dene", self.transport.inbox[0]["stdin"])
+        self.assertIn("queued for FirstMate", plain(app.render()))
 
-    def test_a_paste_the_box_does_not_show_is_unconfirmed_and_never_pasted_twice(self):
-        # Break: an unobserved paste is reported as transferred and the draft dropped, or
-        # trying again puts a second copy into FirstMate's box.
+    def test_a_confirmed_send_does_not_paste_when_the_box_cannot_be_seen(self):
+        # Break: an unseen composer is pasted into, or the send is reported as transferred.
         self.main.render = False
         self.changed_readme()
         app = self.app()
         self.open_changes(app)
         self.double_click(app, self.row_of(app, "+ TWO"))
-        self.type(app, "gördün mü")
+        self.type(app, "keep literal")
         self.keys(app, "enter", "y")
-        frame = plain(app.render())
-        self.assertIn("transfer unconfirmed: FirstMate's message box does not show the message", frame)
-        self.assertIn("last send: unconfirmed", frame)
-        self.assertIn("gördün mü", frame)
-        self.main.render = True
-        app.handle_key("enter")
-        self.assertIn("already has text", plain(app.render()))
-        self.assertEqual(len(self.main.received), 1)
+        self.assertEqual(self.main.received, [])
+        self.assertEqual(len(self.transport.inbox), 1)
+        self.assertIn("keep literal", self.transport.inbox[0]["stdin"])
+        self.assertIn("queued for FirstMate", plain(app.render()))
 
     def test_keys_typed_in_the_inline_editor_are_text_and_paste_is_inert(self):
         # Break: j/k/y typed in the editor move the diff cursor or confirm something, or a
@@ -932,7 +963,8 @@ class InlineMessageTests(PanelFixture):
         start = lines.index("---") + 1
         shown = "".join(lines[start : lines.index("---", start)]).replace(" ", "")
         app.handle_key("y")
-        sent = self.pasted()[0]
+        self.assertEqual(self.main.received, [])
+        sent = self.transport.inbox[-1]["stdin"]
         self.assertEqual(shown, sent.replace("\n", "").replace(" ", ""))
 
     def test_a_saved_unannounced_message_from_before_the_message_box_is_announced_not_resent(self):
@@ -986,7 +1018,8 @@ class InlineMessageTests(PanelFixture):
         app.handle_key("m")
         app.handle_key("enter")
         app.handle_key("y")
-        sent = self.pasted()[0]
+        self.assertEqual(self.main.received, [])
+        sent = self.transport.inbox[-1]["stdin"]
         self.assertIn("\neski kutudan mesaj\n", sent)
         self.assertIn("[1] diff README.md  unstaged  new lines 2-2", sent)
         self.assertNotIn("eski kutudan mesaj", plain(app.render()))

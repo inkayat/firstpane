@@ -567,7 +567,7 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
                 run_id=secrets.token_hex(16),
                 created_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.wall())),
                 skills=[{"name": Path(path).name, "path": path, "skill_md_sha256": next(row["sha"] for row in catalog if row["path"] == path)} for path in selected_skills(self.review_skills, catalog)],
-                repository={"path": view.get("workspace"), "remote": None},
+                repository={"path": None if self.review_source == "pr" else view.get("workspace"), "remote": None},
                 scope=scope,
                 revision=revision,
                 files=patch_files(patch),
@@ -1498,10 +1498,11 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
         return None
 
     def _refresh_prs(self, force):
-        """Fetch every project's open PRs, but only while the Pull Requests tab is showing."""
+        """Fetch the selected agent's repository only, while the Pull Request source is showing."""
         if not self._on("prs"):
             return
-        for project in self._pr_projects():
+        project = self._agent_project()
+        if project is not None:
             self._fetch_prs(project, force=force)
         current = self._current_pr()
         if current:

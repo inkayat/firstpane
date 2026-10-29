@@ -618,7 +618,9 @@ class BoardMixin:
         bottom.extend(self._board_detail_lines(plain, layout["detail"], [], live))
         bottom.extend(self._board_composer_lines(plain, layout["composer"]))
         if layout["footer"]:
-            bottom.append((self._board_footer(plain), None))
+            footer = self._board_footer(plain)
+            if footer.strip():
+                bottom.append((footer, None))
         budget = max(1, self.rows - len(top) - len(bottom))
         body = self._board_body(plain, budget, live)
         body += [("", None)] * (budget - len(body))
@@ -943,9 +945,9 @@ class BoardMixin:
         if tier >= 3:
             bound = self._verified_board_request() if card and self.board_view == "detail" else None
             hint = (
-                "Goes into FirstMate's message box with the task and its open request; you press Enter there"
+                "y queues this for FirstMate with the open request; it is not recorded as the answer"
                 if bound or (draft and any(item.get("kind") == "board-request" for item in draft.get("attachments") or []))
-                else "Goes into FirstMate's message box with the task context; you press Enter there"
+                else "y queues this for FirstMate with the task context"
             )
             if draft and draft.get("outcome"):
                 hint = f"last send: {draft['outcome']} \u00b7 " + hint
@@ -1558,8 +1560,7 @@ class BoardMixin:
         elif self.focus == "search":
             hints = [("Enter", "Keep"), ("Esc", "Clear")]
         else:
-            hints = [("\u2190\u2192", "Column"), ("\u2191\u2193", "Task"), ("Enter", "Detail"), ("Tab", "Message"),
-                     ("g", "Agent"), ("/", "Search"), ("p", "Project"), ("f", "Filter")]
+            return ""
         out, used = "", 1
         for key, word in hints:
             piece = (2 if out else 0) + width(key) + 1 + width(word)

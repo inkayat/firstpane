@@ -187,9 +187,10 @@ class ReviewFrameTests(PanelFixture):
         self.open_changes(app)
         app.render()
         cursor_row = next(line for line in self.lines(app) if "\u258c" in line)
-        self.assertIn("gd/gI: no symbol support", cursor_row)
-        others = [line for line in self.lines(app) if "\u2502" in line and "\u258c" not in line]
-        self.assertFalse(any("gd/gI" in line for line in others))
+        self.assertNotIn("gd/gI", cursor_row)
+        app.handle_key("g")
+        app.handle_key("d")
+        self.assertIn("no symbol support", app.status)
 
     def test_a_wide_diff_has_a_horizontal_scrollbar_whose_arrows_scroll(self):
         # Break: lines wider than the pane give no sign of what is cut off, or the bar's
@@ -279,6 +280,24 @@ class ReviewFrameTests(PanelFixture):
         restored = "\n".join(self.lines(app))
         self.assertIn("Write to FirstMate", restored)
         self.assertFalse(app.review_focus)
+
+    def test_a_narrow_row_click_on_the_drawn_expand_icon_toggles_focus(self):
+        # Break: the Pull Request span is measured before the row is clipped, so it covers the
+        # drawn expand icon and the click switches source or does nothing.
+        self.changed_readme()
+        app = self.app(cols=28, rows=24)
+        self.open_changes(app)
+        app.render()
+        self.assertEqual(app.review_source, "workspace")
+        row = self.row_of(app, "\u2922")
+        col = self.lines(app)[row - 1].index("\u2922") + 1
+        self.click(app, row, col=col)
+        self.assertTrue(app.review_focus, (app.review_source, self.lines(app)[row - 1]))
+        self.assertEqual(app.review_source, "workspace")
+        again = self.row_of(app, "\u2922")
+        self.click(app, again, col=self.lines(app)[again - 1].index("\u2922") + 1)
+        self.assertFalse(app.review_focus)
+        self.assertEqual(app.review_source, "workspace")
 
     def test_writing_a_comment_from_focus_opens_the_message_again(self):
         # Break: choosing a line comment while the header and message are hidden leaves the

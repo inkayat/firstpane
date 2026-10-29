@@ -233,7 +233,9 @@ class AgentsMixin:
             bottom.append((" " + _fg("Write to FirstMate", INK, plain), None, None))
         bottom.extend(self._input_lines(cursor, plain, layout["input"] == 3))
         if layout["footer"]:
-            bottom.append((self._status_line(plain) if self.status else self._hint_line(cursor, plain), None, None))
+            footer = self._status_line(plain) if self.status else self._hint_line(cursor, plain)
+            if footer.strip():
+                bottom.append((footer, None, None))
         budget = max(1, self.rows - 1 - len(top) - len(bottom))
         tree = self._agent_tree_lines(rows, index, budget, plain, tall=layout["gap"] == 1)
         if self.status and not layout["footer"]:
@@ -521,12 +523,13 @@ class AgentsMixin:
         elif self.focus == "search":
             hints = [("Enter", "Keep"), ("Esc", "Clear")]
         else:
-            hints = [("\u2191\u2193", "Select")]
+            hints = []
             if row is not None and row["kind"] == "project":
                 hints.append(("Enter", "Fold"))
             elif row is not None and row["kind"] == "agent" and not (self.target and tuple(self.target["key"]) == tuple(row["key"])):
                 hints.append(("Enter", "Select"))
-            hints += [("g", "Focus"), ("Tab", "Message"), ("/", "Search"), ("f", "Filter")]
+        if not hints:
+            return ""
         out, used = "", 1
         for key, word in hints:
             piece = (2 if out else 0) + width(key) + 1 + width(word)
