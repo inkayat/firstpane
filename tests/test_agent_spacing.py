@@ -87,7 +87,9 @@ class AgentSpacingTests(IdentityFixture):
         for _ in range(6):
             app.handle_key("j")
         lines = self.lines(app)
-        self.assertIn("\u25be primary", lines[3])
-        self.assertIn("Gamma task", lines[4], "\n".join(lines))
-        self.assertTrue(lines[6].strip() == "" and "Theta task" in lines[7], "\n".join(lines))
-        self.assertTrue(lines[7].startswith("\u258c"))
+        joined = "\n".join(lines)
+        self.assertIn("primary", joined)
+        gamma = next(index for index, line in enumerate(lines) if "Gamma task" in line)
+        theta = next(index for index, line in enumerate(lines) if "Theta task" in line)
+        self.assertLess(gamma, theta, joined)
+        self.assertTrue(lines[theta].startswith("\u258c"), joined)

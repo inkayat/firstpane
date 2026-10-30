@@ -866,14 +866,14 @@ class BrowserTabTests(unittest.TestCase):
         self.assertIn("```text\nmarked text\nsecond\n```", preview)
         self.assertIn("agent: alpha-task", preview)
         self.app.handle_key("y")
-        self.assertEqual(self.transport.inbox, [])
-        self.assertEqual(len(self.main.received), 1)
+        self.assertEqual(self.main.received, [])
         self.assertEqual(self.main.submitted, [])
-        body = self.main.received[0]
+        self.assertEqual(len(self.transport.inbox), 1)
+        body = self.transport.inbox[0]["stdin"]
         self.assertIn("bak şuna", body)
         self.assertIn("marked text\nsecond", body)
         self.assertIn("agent: alpha-task", body)
-        self.assertIn("press Enter there to send", self.frame())
+        self.assertIn("queued for FirstMate; not processed yet", self.frame())
 
     def test_ctrl_g_captures_like_a_in_the_browser_tab(self):
         # Break: Ctrl-G, the browser's own send-to-agent key, does nothing in Firstpane's tab.
@@ -891,10 +891,13 @@ class BrowserTabTests(unittest.TestCase):
         self.capture("ctrl-g")
         self.app.handle_bytes(b"look here")
         self.app.handle_key("enter")
-        self.assertIn("not transferred: FirstMate is working", self.frame())
+        self.assertEqual(self.app.screen, "confirm-send")
+        self.assertIn("look here", self.frame())
         self.assertTrue(all(len(line) <= 60 for line in self.frame().splitlines()))
+        self.app.handle_key("y")
         self.assertEqual(self.main.received, [])
-        self.assertEqual(self.app.draft["body"], "look here")
+        self.assertEqual(len(self.transport.inbox), 1)
+        self.assertIn("look here", self.transport.inbox[0]["stdin"])
 
     # ---- the toolbar's select tool -----------------------------------------------------
     def test_picking_an_element_with_the_select_tool_opens_a_firstmate_message_about_it(self):
@@ -912,9 +915,10 @@ class BrowserTabTests(unittest.TestCase):
         self.app.handle_key("enter")
         self.assertIn('[<p id="line1">FPBM alpha</p> selector: #line1]', self.frame())
         self.app.handle_key("y")
-        self.assertEqual(len(self.main.received), 1)
+        self.assertEqual(self.main.received, [])
         self.assertEqual(self.main.submitted, [])
-        body = self.main.received[0]
+        self.assertEqual(len(self.transport.inbox), 1)
+        body = self.transport.inbox[-1]["stdin"]
         self.assertIn("fix this paragraph", body)
         self.assertIn('[<p id="line1">FPBM alpha</p> selector: #line1]', body)
         self.assertIn(self.URL, body)
@@ -962,9 +966,10 @@ class BrowserTabTests(unittest.TestCase):
         self.assertEqual(self.app.screen, "confirm-send")
         self.app.handle_key("y")
         self.assertEqual(self.main.submitted, [])
-        self.assertEqual(len(self.main.received), 1)
-        self.assertIn("show this in English", self.main.received[0])
-        self.assertIn(element, self.main.received[0])
+        self.assertEqual(self.main.received, [])
+        self.assertEqual(len(self.transport.inbox), 1)
+        self.assertIn("show this in English", self.transport.inbox[0]["stdin"])
+        self.assertIn(element, self.transport.inbox[0]["stdin"])
 
     def test_a_select_tool_message_waits_for_an_idle_empty_firstmate_box_and_is_put_there_once(self):
         # Break: a picked element's message is pasted while FirstMate works or over text the
@@ -974,22 +979,21 @@ class BrowserTabTests(unittest.TestCase):
         self.assertEqual(self.pick('[<p id="line1">FPBM alpha</p> selector: #line1]'), 200)
         self.app.handle_bytes(b"look here")
         self.main.pane["agent_status"] = "working"
-        self.app.handle_key("enter")
-        self.assertIn("not transferred: FirstMate is working", self.frame())
-        self.main.pane["agent_status"] = "idle"
         self.main.text = "captain typing"
         self.app.handle_key("enter")
-        self.assertIn("not transferred: FirstMate's message box already has text", self.frame())
-        self.assertEqual((self.main.text, self.main.received, self.app.draft["body"]), ("captain typing", [], "look here"))
-        self.main.text = ""
-        self.app.handle_key("enter")
+        self.assertEqual(self.app.screen, "confirm-send")
         self.app.handle_key("y")
-        self.assertEqual(len(self.main.received), 1)
+        self.assertEqual(self.main.received, [])
+        self.assertEqual(self.main.text, "captain typing")
+        self.assertEqual(len(self.transport.inbox), 1)
+        self.assertIn("look here", self.transport.inbox[0]["stdin"])
         self.assertEqual(self.pick('[<h1>Other</h1> selector: h1]'), 200)
         self.app.handle_bytes(b"and this")
         self.app.handle_key("enter")
-        self.assertIn("already has text", self.frame())
-        self.assertEqual((len(self.main.received), self.main.submitted), (1, []))
+        self.app.handle_key("y")
+        self.assertEqual(self.main.received, [])
+        self.assertEqual(self.main.submitted, [])
+        self.assertEqual(len(self.transport.inbox), 2)
 
     def test_the_select_tool_bridge_takes_picks_only_from_the_browser_it_launched(self):
         # Break: any local process that finds the loopback port can open a FirstMate message

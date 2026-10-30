@@ -59,13 +59,6 @@ GUTTER = rgb_fg(MUTED)
 GUTTER_PICK = "1;" + rgb_fg(ACCENT)
 RULE = rgb_fg(MUTED)
 BAR = rgb_fg(ACCENT)
-HEADER_STATUS = {
-    "working": rgb_fg(GREEN),
-    "blocked": rgb_fg(YELLOW),
-    "done": rgb_fg(GREEN),
-    "idle": rgb_fg(MUTED),
-    "agent closed": rgb_fg(PINK),
-}
 
 
 def _edge(left, right, cols):
@@ -281,25 +274,24 @@ class ChangesMixin:
         first = spread(left, right, self.cols)
         if not full:
             return [first]
-        live = self._target_live()
-        word = target.get("status") if live else "agent closed"
+        # Routine status, file count and checkout path are already on Agents or the Workspace
+        # sub-tab. This line keeps only a qualification the rest of the page does not show.
         muted = rgb_fg(MUTED)
-        parts = [paint(word, HEADER_STATUS.get(word, rgb_fg(PINK)), plain)]
-        if status is not None:
-            parts.append(paint(f"{status.changed} file" + ("" if status.changed == 1 else "s"), muted, plain))
-        else:
-            parts.append(paint("? files", muted, plain))
+        parts = []
+        if not self._target_live():
+            parts.append(paint("agent closed", rgb_fg(PINK), plain))
+        if ws is not None and ws.state == "ambiguous":
+            parts.append(paint("workspace ambiguous", rgb_fg(PINK), plain))
         if ws is not None and ws.path:
-            if ws.state == "ambiguous":
-                parts.append(paint("workspace ambiguous", rgb_fg(PINK), plain))
             shared = self._shared_count(ws.path)
             if shared > 1:
                 parts.append(paint(f"shared by {shared} agents", muted, plain))
-            home = os.path.expanduser("~")
-            where = "~" + ws.path[len(home) :] if home != "~" and ws.path.startswith(home + "/") else ws.path
-            parts.append(paint(f"{where} ({ws.provenance})", muted, plain))
-        elif info is not None:
-            parts.append(paint(self._ws_word(info), muted, plain))
+        elif info is not None and status is None:
+            word = self._ws_word(info)
+            if word != "loading":
+                parts.append(paint(word, rgb_fg(PINK), plain))
+        if not parts:
+            return [first]
         return [first, " " + paint(" · ", muted, plain).join(parts)]
 
     # ---- Changes tab -----------------------------------------------------------------
@@ -579,13 +571,26 @@ class ChangesMixin:
         label = self._code_review_label()
         control = _pill(label + " \u25be", plain, self._shades()["pill"]) if label else paint("Code review: not set up", rgb_fg(MUTED), plain)
         icon = "\u2922"
-        right = control + "  " + icon + " "
-        control_at = self.cols - width(right)
-        icon_at = control_at + width(control) + 2
-        spans.append((control_at, control_at + width(control), "codereview"))
-        spans.append((icon_at, icon_at + width(icon), "focus"))
+        tail = "  " + icon + " "
+        # Keep the expand icon on screen: the code-review label yields before the icon is clipped.
+        room = max(0, self.cols - width(tail))
+        if width(control) > room:
+            control = fit(control, room)
+        right = control + tail
+        right_at = max(0, self.cols - width(right))
+        # Left labels are clipped to make room for the right controls. Their hit spans must stop
+        # where the drawn text stops, or a Pull Request span covers the expand icon.
+        kept = []
+        for start, end, name in spans:
+            if end <= right_at:
+                kept.append((start, end, name))
+            elif start < right_at:
+                kept.append((start, right_at, name))
+        control_at = right_at
+        kept.append((control_at, control_at + width(control), "codereview"))
+        kept.append((control_at + width(control), self.cols, "focus"))
         self._review_menu_end = control_at + width(control)
-        return _edge(left, right, self.cols), {"kind": "review-source", "spans": spans}
+        return _edge(left, right, self.cols), {"kind": "review-source", "spans": kept}
 
     def _review_scope_text(self):
         if self.review_source == "pr":
@@ -657,7 +662,7 @@ class ChangesMixin:
             self.review_menu = None
             return
         if getattr(self.config, "review", None) is None:
-            self.status = "Code review is not set up: add review.command and review.skills to Firstpane's config.json"
+            self.status = "Code review: set review.command in config.json (see README)"
             return
         self.changes_menu = None
         self.pr_menu = None
@@ -695,16 +700,18 @@ class ChangesMixin:
             else:
                 self.review_menu = None
             return
-        name = next((span[2] for span in hit["spans"] if span[0] <= column - 1 < span[1]), None)
+        column0 = column - 1
+        if any(span[2] == "focus" and span[0] <= column0 < span[1] for span in hit["spans"]):
+            self.review_menu = None
+            self.review_focus = not self.review_focus
+            return
+        name = next((span[2] for span in hit["spans"] if span[0] <= column0 < span[1]), None)
         if name in ("workspace", "pr"):
             self.review_menu = None
             self._close_inline()
             self._set_review_source(name)
         elif name == "codereview":
             self._toggle_review_menu()
-        elif name == "focus":
-            self.review_menu = None
-            self.review_focus = not self.review_focus
 
     def _review_menu_pick(self, action):
         kind = action[0]
@@ -1131,7 +1138,7 @@ class ChangesMixin:
             offer = f" {ADD_SHORT} "
         if offer:
             hit["icon"] = cols - width(offer) + 2
-        hint = " gd/gI: no symbol support " if cursor and cols - gutter_width >= 72 else ""
+        hint = ""
         marker = self._finding_marker(index)
         if marker:
             offer = marker + offer

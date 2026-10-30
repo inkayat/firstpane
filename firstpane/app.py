@@ -2,7 +2,7 @@
 
 Layout: a tab row (Agents, Review, Board, Terminal, Browser) and a header Settings control.
 Review shows the selected agent's workspace or a pull request. Messages to FirstMate are written
-inline and pasted unsent. The Terminal tab is a new empty shell in the selected agent's directory.
+inline and queued with `fm-inbox.sh`. The Terminal tab is a new empty shell in the selected agent's directory.
 """
 
 import json
@@ -21,7 +21,7 @@ from firstpane.changes_view import HIDDEN_HEADERS, ChangesMixin
 from firstpane.composer_view import ComposerMixin, note_outcome
 from firstpane.drafts import DraftStore
 from firstpane.frames import FrameMedium
-from firstpane.fmmeta import display_labels, load_metas
+from firstpane.fmmeta import display_labels, load_meta, load_metas
 from firstpane.gitremote import choose_remote, parse_git_remote_url
 from firstpane.icons import NO_GRAPHICS, HarnessIcons
 from firstpane.input import InputDecoder
@@ -33,7 +33,7 @@ from firstpane.sanitize import sanitize
 from firstpane.scope import path_in_scope, scope_root
 from firstpane.sessionname import session_from_socket_path
 from firstpane.settings_view import SettingsMixin, migrate_ui_state
-from firstpane.style import INK, MUTED, PINK, YELLOW, frame_lines, no_color, paint, rgb_fg
+from firstpane.style import INK, MUTED, YELLOW, frame_lines, no_color, paint, rgb_fg
 from firstpane.tabs import SETTINGS_KEY, SOURCE_KEY, TAB_LABELS, TAB_SHORT, TABS
 from firstpane.terminal_view import TerminalMixin
 from firstpane.workspace import FileEntry, parse_diff, read_diff
@@ -53,13 +53,15 @@ PR_CADENCE = 120
 SNAPSHOT_CADENCE = 2
 LIST_LIMIT = 21
 SHOW_LIMIT = 20
+LOOKUP_LIMIT = 30
+GH_PR_FIELDS = "number,title,isDraft,reviewDecision,statusCheckRollup,headRefName,isCrossRepository,updatedAt"
 DIFF_CAP = 200_000
 PROJECT_LIMIT = 200
 GIT_RETRY = 30
 SNAPSHOT_FAILED = "snapshot failed"
 SOCKET_ERRORS = (TimeoutError, OSError, ConnectionError, ValueError)
 TERMINAL_OUTCOMES = ("posted", "queued", "already-sent")
-PR_FIELDS = ("pr_rows", "truncated", "choice", "fetched_at", "remote_loaded", "pr_reason", "pr_error")
+PR_FIELDS = ("pr_rows", "truncated", "choice", "fetched_at", "remote_loaded", "pr_reason", "pr_error", "pr_lookups")
 TARGET_FIELDS = (
     "kind", "project_key", "project_label", "label", "harness", "status", "pane_id", "terminal_id",
     "workspace_id", "tab_id", "task_id", "focusable", "recorded", "herdr_checkout", "cwd_hint",
@@ -113,8 +115,6 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
         self.other_agents = []
         self.selection_key = None
         self.folded_projects = set()
-        self.folded_prs = set()
-        self.pr_selection_key = None
         self.hit_rows = []
         self.last_agent = {}
         self.last_snapshot_at = None
@@ -126,6 +126,7 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
         self._common_cache = {}
         self._git_cache = {}
         self._fetches = {}
+        self._lookups = {}
         self.decoder = InputDecoder()
         self.tab = "agents"
         self.review_source = "workspace"
@@ -166,7 +167,6 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
         self.icons = HarnessIcons(clock, enabled=not no_color(env))
         self.pixel_mouse = None
         self.cell_known = False
-        self._body_budget = rows
         self._tab_spans = []
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.drafts = DraftStore(self.state_dir / "drafts")
@@ -356,11 +356,11 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
         if kind == "draft":
             self._open_target(hit["target"])
             return
-        if kind and kind.startswith("pr-") and kind != "pr-project":
+        if kind and kind.startswith("pr-"):
             self._pr_mouse(hit, column)
             self._save_ui()
             return
-        if kind not in ("project", "pr-project", "agent", "pr", "more", "other"):
+        if kind not in ("project", "agent", "other"):
             return
         matches = [item for item in self._rows() if item["key"] == hit["key"]]
         if len(matches) != 1:
@@ -567,7 +567,7 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
                 run_id=secrets.token_hex(16),
                 created_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.wall())),
                 skills=[{"name": Path(path).name, "path": path, "skill_md_sha256": next(row["sha"] for row in catalog if row["path"] == path)} for path in selected_skills(self.review_skills, catalog)],
-                repository={"path": view.get("workspace"), "remote": None},
+                repository={"path": None if self.review_source == "pr" else view.get("workspace"), "remote": None},
                 scope=scope,
                 revision=revision,
                 files=patch_files(patch),
@@ -730,8 +730,6 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
             self._arm_browser(rows[index])
         elif key == "c" and rows:
             self._arm_comment(rows[index])
-        elif key == "m" and rows and self._on("prs"):
-            self._arm_note(rows[index])
 
     # ---- layout ----------------------------------------------------------------------
     def render(self):
@@ -833,47 +831,6 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
             return self._terminal_body(plain, budget)
         return [""], [None]
 
-    def _tree_lines(self, rows, budget, lines, hits, plain):
-        self._body_budget = max(1, budget)
-        index = self._selected_index(rows)
-        window, selected_at = self._window(rows, index)
-        lines.extend(self._paint_row(row, offset == selected_at, plain) for offset, row in enumerate(window))
-        hits.extend(window)
-        return lines, hits
-
-    def _tree_budget(self):
-        return self._body_budget
-
-    def _header_index(self, rows, index):
-        project_key = rows[index].get("project_key")
-        for candidate in range(index, -1, -1):
-            row = rows[candidate]
-            if row["kind"] == "pr-project" and row.get("project_key") == project_key:
-                return candidate
-        return index
-
-    def _window(self, rows, index):
-        budget = self._tree_budget()
-        if len(rows) <= budget:
-            return rows, index
-        header = self._header_index(rows, index)
-        if index == header or budget < 2:
-            start = min(max(0, index - budget + 1), max(0, len(rows) - budget))
-            window = rows[start : start + budget]
-            return window, index - start
-        after = rows[header + 1 :]
-        selected = index - header - 1
-        rest = budget - 1
-        start = min(max(0, selected - rest + 1), max(0, len(after) - rest))
-        chunk = after[start : start + rest]
-        return [rows[header]] + chunk, 1 + selected - start
-
-    def _paint_row(self, row, selected, plain):
-        marker = ">" if selected else " "
-        if row["kind"] == "pr-project":
-            return marker + paint(row["text"], "1;" + rgb_fg(PINK), plain)
-        return marker + "  " + row["text"]
-
     def _fit(self, text):
         return fit(text, self.cols)
 
@@ -895,10 +852,6 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
         common = self._common_dir(meta.get("worktree"))
         return bool(common) and _canonical(common) == _canonical(meta["project"])
 
-    def _pr_projects(self):
-        """The Pull Requests inventory: every project except a private clone shown on Agents only."""
-        return [project for project in self.projects if not project.get("agents_only")]
-
     def _generic_in_scope(self, agent, pane, workspaces):
         workspace = workspaces.get(agent.get("workspace_id")) or {}
         worktree = workspace.get("worktree") if isinstance(workspace.get("worktree"), dict) else None
@@ -908,7 +861,7 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
         return self._in_scope(cwd)
 
     def _rows(self):
-        return self._pr_rows() if self._on("prs") else self._agent_tree_rows()
+        return self._agent_tree_rows()
 
     def _agent_tree_rows(self):
         rows = []
@@ -932,26 +885,6 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
             rows.extend(others)
         return rows
 
-    def _pr_rows(self):
-        rows = []
-        for project in self._pr_projects():
-            state = self._pr_state(project)
-            if state not in ("prs", "error"):
-                continue
-            rows.append(self._pr_project_row(project, state))
-            if state == "prs" and project["key"] not in self.folded_prs:
-                rows.extend(project["pr_rows"])
-                if project.get("truncated"):
-                    rows.append(
-                        {
-                            "kind": "more",
-                            "key": ("more", project["key"]),
-                            "project_key": project["key"],
-                            "text": "+more",
-                        }
-                    )
-        return rows
-
     def _pr_state(self, project):
         """loading (never answered), error, skipped (no queryable GitHub remote), empty, or prs."""
         if project.get("fetched_at") is None:
@@ -963,26 +896,6 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
             return "skipped"
         return "prs" if project["pr_rows"] else "empty"
 
-    def _pr_summary(self):
-        """What the list cannot show: projects still loading, failing, or never queried."""
-        states = [self._pr_state(project) for project in self._pr_projects()]
-        loading, failed, skipped = states.count("loading"), states.count("error"), states.count("skipped")
-        parts = []
-        if loading:
-            parts.append(f"loading \u00b7 {len(states) - loading} of {len(states)} projects checked")
-        elif not states:
-            parts.append("no projects")
-        elif not failed and "prs" not in states:
-            parts.append("no open pull requests")
-        if failed:
-            parts.append(f"{failed} failed")
-        if skipped:
-            parts.append(f"{skipped} not queried (no allowed GitHub remote)")
-        return " \u00b7 ".join(parts)
-
-    def _mark(self, open_):
-        return "\u25be" if open_ else "\u25b8"
-
     def _project_row(self, project, count):
         return {
             "kind": "project",
@@ -992,30 +905,11 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
             "agent_count": count,
         }
 
-    def _pr_project_row(self, project, state):
-        if state == "error":
-            text = "! " + project["label"] + "  " + project["pr_error"]
-        else:
-            text = self._mark(project["key"] not in self.folded_prs) + " " + project["label"]
-            choice = project.get("choice")
-            if choice and choice.notice:
-                text += "  " + choice.notice
-        return {
-            "kind": "pr-project",
-            "key": ("pr-project", project["key"]),
-            "project_key": project["key"],
-            "text": text,
-            "state": state,
-        }
-
     def _cursor(self):
-        return self.pr_selection_key if self._on("prs") else self.selection_key
+        return self.selection_key
 
     def _set_cursor(self, key):
-        if self._on("prs"):
-            self.pr_selection_key = key
-        else:
-            self.selection_key = key
+        self.selection_key = key
 
     def _selected_index(self, rows):
         if not rows:
@@ -1053,18 +947,6 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
                     self.selection_key = restored
             else:
                 self.folded_projects.add(key)
-            return
-        if row["kind"] == "pr-project":
-            key = row["project_key"]
-            if row["state"] == "error":
-                self._fetch_prs(self._project(key), force=True)
-            elif key in self.folded_prs:
-                self.folded_prs.remove(key)
-            else:
-                self.folded_prs.add(key)
-            return
-        if row["kind"] == "pr":
-            self._choose_pr(row)
             return
         if row["kind"] == "agent":
             self._select_target(row)
@@ -1492,17 +1374,17 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
         return None
 
     def _meta(self, task_id):
-        for meta in load_metas(self.config.firstmate_home):
-            if meta["task_id"] == task_id:
-                return meta
-        return None
+        return load_meta(self.config.firstmate_home, task_id)
 
     def _refresh_prs(self, force):
-        """Fetch every project's open PRs, but only while the Pull Requests tab is showing."""
+        """Fetch the selected agent's repository only, while the Pull Request source is showing."""
         if not self._on("prs"):
             return
-        for project in self._pr_projects():
+        project = self._pr_project()
+        if project is not None:
             self._fetch_prs(project, force=force)
+            if self._fetch_pr_lookup(project, force):
+                self.poll()
         current = self._current_pr()
         if current:
             self._fetch_pr_detail(current, force=force)
@@ -1527,6 +1409,61 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
         )
         self.poll()
 
+    def _fetch_pr_lookup(self, project, force):
+        """The selected agent's own pull request, by its branch and recorded number, when the
+        project list was cut off before reaching it. Never for a private task clone."""
+        choice = project.get("choice")
+        if not project.get("truncated") or project.get("agents_only") or choice is None or not choice.slug:
+            return False
+        if (self.target or {}).get("project_key") != project["key"]:
+            return False
+        identity = self._lookup_identity(choice.slug)
+        if not any(identity) or self._associated_pr(lookups=False)[0] == "pr":
+            return False
+        key = (project["key"], *identity)
+        if key in self._lookups:
+            return False
+        entry = (project.get("pr_lookups") or {}).get(identity)
+        now = self.clock()
+        if not force and entry is not None and now - entry["at"] < PR_CADENCE:
+            return False
+        self._lookups[key] = self.submit(lambda: self._load_pr_lookup(choice, project["key"], identity, now))
+        return True
+
+    def _load_pr_lookup(self, choice, project_key, identity, now):
+        branch, number = identity
+        items, failed = [], False
+        if branch:
+            payload = self._gh_json(
+                ["gh", "pr", "list", "-R", choice.slug, "--state", "open", "--head", branch, "--limit", str(LOOKUP_LIMIT), "--json", GH_PR_FIELDS]
+            )
+            if isinstance(payload, list):
+                items.extend(payload)
+            else:
+                failed = True
+        if number:
+            payload = self._gh_json(["gh", "pr", "view", str(number), "-R", choice.slug, "--json", GH_PR_FIELDS + ",state"])
+            if not isinstance(payload, dict):
+                failed = True
+            elif payload.get("state") == "OPEN":
+                items.append(payload)
+        rows = {}
+        for item in items:
+            row = self._pr_row(choice, item, project_key)
+            if row:
+                rows[tuple(row["key"])] = row
+        error = "could not look up the agent's pull request" if failed else None
+        return identity, {"rows": list(rows.values()), "error": error, "at": now}
+
+    def _gh_json(self, argv):
+        result = self.transport.run(argv, env=self._gh_env(), timeout=LIST_TIMEOUT, cwd=str(self.state_dir))
+        if result.timed_out or result.code != 0:
+            return None
+        try:
+            return json.loads(result.stdout or "null")
+        except json.JSONDecodeError:
+            return None
+
     def poll(self):
         for key, future in list(self._fetches.items()):
             if not future.done():
@@ -1540,6 +1477,20 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
             except Exception:
                 update = {"fetched_at": self.clock(), "pr_error": "PRs unavailable: gh failed"}
             project.update(update)
+            if self._on("prs"):
+                self._fetch_pr_lookup(project, False)
+        for key, future in list(self._lookups.items()):
+            if not future.done():
+                continue
+            del self._lookups[key]
+            project = self._project(key[0])
+            if project is None:
+                continue
+            try:
+                identity, entry = future.result()
+            except Exception:
+                identity, entry = key[1:], {"rows": [], "error": "could not look up the agent's pull request", "at": self.clock()}
+            project.setdefault("pr_lookups", {})[identity] = entry
         self._poll_workspaces()
         self._poll_capture()
         self._poll_pr_details()
@@ -1611,7 +1562,7 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
                 "--limit",
                 str(LIST_LIMIT),
                 "--json",
-                "number,title,isDraft,reviewDecision,statusCheckRollup,headRefName,updatedAt",
+                GH_PR_FIELDS,
             ],
             env=self._gh_env(),
             timeout=LIST_TIMEOUT,
@@ -1657,6 +1608,7 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
             "slug": choice.slug,
             "title": title,
             "head": sanitize(item.get("headRefName") or ""),
+            "cross_repository": item.get("isCrossRepository") is True,
         }
 
     def _selected_pr(self, row):
@@ -1706,7 +1658,6 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
             ]
         )
         self.screen = "detail"
-        self.pr_selection_key = row["key"]
 
     def _open_pr_review(self, pr, path=None):
         """The PR's whole diff, or the pinned PR commit's, in the shared diff viewport; with
@@ -1779,7 +1730,6 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
             text = text[:DIFF_CAP] + "\n[diff truncated]\n"
         self.detail_text = title + "\n" + text
         self.screen = "diff"
-        self.pr_selection_key = row["key"]
 
     def _arm_browser(self, row):
         pr = self._selected_pr(row)
@@ -2124,13 +2074,9 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
         if not isinstance(data, dict):
             return
         self.folded_projects = set(data.get("folded_projects") or [])
-        self.folded_prs = set(data.get("folded_prs") or [])
         selection = data.get("selection")
         if isinstance(selection, list):
             self.selection_key = tuple(selection)
-        pr_selection = data.get("pr_selection")
-        if isinstance(pr_selection, list):
-            self.pr_selection_key = tuple(pr_selection)
         pr_choice = data.get("pr_choice")
         if isinstance(pr_choice, list):
             self.pr_choice = tuple(pr_choice)
@@ -2173,9 +2119,7 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
             target["key"] = list(self.target["key"])
         payload = {
             "folded_projects": sorted(self.folded_projects),
-            "folded_prs": sorted(self.folded_prs),
             "selection": list(self.selection_key) if self.selection_key else None,
-            "pr_selection": list(self.pr_selection_key) if self.pr_selection_key else None,
             "pr_choice": list(self.pr_choice) if self.pr_choice else None,
             "pr_section": self.pr_section,
             "pr_resolved_open": self.pr_resolved_open,

@@ -7,7 +7,7 @@ import os
 import secrets
 from pathlib import Path
 
-FINISHED = ("queued", "already-sent", "transferred")
+FINISHED = ("queued", "already-sent", "already-queued", "transferred")
 
 
 class DraftStore:

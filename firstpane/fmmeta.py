@@ -65,6 +65,15 @@ def parse_meta(text, task_id):
     return fields
 
 
+def load_meta(home, task_id):
+    if not home or not task_id or "/" in task_id:
+        return None
+    try:
+        return parse_meta((Path(home) / "state" / f"{task_id}.meta").read_text(), task_id)
+    except OSError:
+        return None
+
+
 def load_metas(home):
     if not home:
         return []
