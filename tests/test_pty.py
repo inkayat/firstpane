@@ -354,6 +354,44 @@ class PtyTests(unittest.TestCase):
         self.assertEqual(index_after, index_before)
         self.assertNotIn("pane.focus", self.herdr.calls)
 
+    def test_the_unsent_draft_setting_pastes_into_a_working_primary_on_the_real_entrypoint(self):
+        # Break: on the real entrypoint the Settings choice is not reachable by a click, a
+        # confirmed message is queued or waits for idle instead of pasting, Enter is pressed in
+        # FirstMate's box, text already there (ending in a space) is replaced, or a paste that
+        # pi collapses into a `[paste #N ...]` marker is reported unconfirmed.
+        self.main.pane["agent_status"] = "working"
+        self.main.text = "typed earlier "
+        term = self.open()
+        term.wait_for(lambda s: "Pty task" in s.text())
+        term.send(b"\r")
+        term.send(b",")
+        term.wait_for(lambda s: "Messages to FirstMate" in s.text() and "Unsent draft in input box" in s.text())
+        row = self.row_of(term.screen, "Unsent draft in input box")
+        column = term.screen.lines()[row - 1].index("Unsent") + 1
+        term.send(f"\x1b[<0;{column};{row}M\x1b[<0;{column};{row}m".encode())
+        term.wait_for(lambda s: "(\u2022) Unsent draft in input box" in s.text())
+        term.send(b"\x1b")
+        term.send(b"2")
+        term.wait_for(lambda s: "+ TWO" in s.text())
+        row = self.row_of(term.screen, "+ TWO")
+        term.send(f"\x1b[<0;20;{row}M\x1b[<0;20;{row}m\x1b[<0;20;{row}M\x1b[<0;20;{row}m".encode())
+        term.wait_for(lambda s: "1 selection added" in s.text())
+        term.send(b"\x1b[200~" + b"long note " * 120 + b"\x1b[201~")
+        term.send(b"\r")
+        term.wait_for(lambda s: "Paste this into FirstMate's input box as an unsent draft" in s.text())
+        self.assertNotIn("Queue this for FirstMate", term.screen.text())
+        self.assertEqual(self.main.received, [])
+        term.send(b"y")
+        term.wait_for(lambda s: "not sent" in s.text())
+        self.assertEqual(self.main.pane["agent_status"], "working")
+        self.assertEqual(len(self.main.received), 1)
+        self.assertTrue(self.main.received[0].startswith("\x1b[200~") and self.main.received[0].endswith("\x1b[201~"))
+        self.assertIn("long note", self.main.received[0])
+        self.assertRegex(self.main.text, r"^typed earlier \[paste #1 (\+\d+ lines|\d+ chars)\]$")
+        self.assertEqual(self.main.submitted, [])
+        self.assertNotIn("pane.focus", self.herdr.calls)
+        self.assertNotIn("unconfirmed", term.screen.text())
+
     def osascript_calls(self):
         if not self.osascript_log.exists():
             return []
