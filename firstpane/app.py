@@ -53,13 +53,15 @@ PR_CADENCE = 120
 SNAPSHOT_CADENCE = 2
 LIST_LIMIT = 21
 SHOW_LIMIT = 20
+LOOKUP_LIMIT = 30
+GH_PR_FIELDS = "number,title,isDraft,reviewDecision,statusCheckRollup,headRefName,isCrossRepository,updatedAt"
 DIFF_CAP = 200_000
 PROJECT_LIMIT = 200
 GIT_RETRY = 30
 SNAPSHOT_FAILED = "snapshot failed"
 SOCKET_ERRORS = (TimeoutError, OSError, ConnectionError, ValueError)
 TERMINAL_OUTCOMES = ("posted", "queued", "already-sent")
-PR_FIELDS = ("pr_rows", "truncated", "choice", "fetched_at", "remote_loaded", "pr_reason", "pr_error")
+PR_FIELDS = ("pr_rows", "truncated", "choice", "fetched_at", "remote_loaded", "pr_reason", "pr_error", "pr_lookups")
 TARGET_FIELDS = (
     "kind", "project_key", "project_label", "label", "harness", "status", "pane_id", "terminal_id",
     "workspace_id", "tab_id", "task_id", "focusable", "recorded", "herdr_checkout", "cwd_hint",
@@ -124,6 +126,7 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
         self._common_cache = {}
         self._git_cache = {}
         self._fetches = {}
+        self._lookups = {}
         self.decoder = InputDecoder()
         self.tab = "agents"
         self.review_source = "workspace"
@@ -1380,6 +1383,8 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
         project = self._pr_project()
         if project is not None:
             self._fetch_prs(project, force=force)
+            if self._fetch_pr_lookup(project, force):
+                self.poll()
         current = self._current_pr()
         if current:
             self._fetch_pr_detail(current, force=force)
@@ -1404,6 +1409,61 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
         )
         self.poll()
 
+    def _fetch_pr_lookup(self, project, force):
+        """The selected agent's own pull request, by its branch and recorded number, when the
+        project list was cut off before reaching it. Never for a private task clone."""
+        choice = project.get("choice")
+        if not project.get("truncated") or project.get("agents_only") or choice is None or not choice.slug:
+            return False
+        if (self.target or {}).get("project_key") != project["key"]:
+            return False
+        identity = self._lookup_identity(choice.slug)
+        if not any(identity) or self._associated_pr(lookups=False)[0] == "pr":
+            return False
+        key = (project["key"], *identity)
+        if key in self._lookups:
+            return False
+        entry = (project.get("pr_lookups") or {}).get(identity)
+        now = self.clock()
+        if not force and entry is not None and now - entry["at"] < PR_CADENCE:
+            return False
+        self._lookups[key] = self.submit(lambda: self._load_pr_lookup(choice, project["key"], identity, now))
+        return True
+
+    def _load_pr_lookup(self, choice, project_key, identity, now):
+        branch, number = identity
+        items, failed = [], False
+        if branch:
+            payload = self._gh_json(
+                ["gh", "pr", "list", "-R", choice.slug, "--state", "open", "--head", branch, "--limit", str(LOOKUP_LIMIT), "--json", GH_PR_FIELDS]
+            )
+            if isinstance(payload, list):
+                items.extend(payload)
+            else:
+                failed = True
+        if number:
+            payload = self._gh_json(["gh", "pr", "view", str(number), "-R", choice.slug, "--json", GH_PR_FIELDS + ",state"])
+            if not isinstance(payload, dict):
+                failed = True
+            elif payload.get("state") == "OPEN":
+                items.append(payload)
+        rows = {}
+        for item in items:
+            row = self._pr_row(choice, item, project_key)
+            if row:
+                rows[tuple(row["key"])] = row
+        error = "could not look up the agent's pull request" if failed else None
+        return identity, {"rows": list(rows.values()), "error": error, "at": now}
+
+    def _gh_json(self, argv):
+        result = self.transport.run(argv, env=self._gh_env(), timeout=LIST_TIMEOUT, cwd=str(self.state_dir))
+        if result.timed_out or result.code != 0:
+            return None
+        try:
+            return json.loads(result.stdout or "null")
+        except json.JSONDecodeError:
+            return None
+
     def poll(self):
         for key, future in list(self._fetches.items()):
             if not future.done():
@@ -1417,6 +1477,20 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
             except Exception:
                 update = {"fetched_at": self.clock(), "pr_error": "PRs unavailable: gh failed"}
             project.update(update)
+            if self._on("prs"):
+                self._fetch_pr_lookup(project, False)
+        for key, future in list(self._lookups.items()):
+            if not future.done():
+                continue
+            del self._lookups[key]
+            project = self._project(key[0])
+            if project is None:
+                continue
+            try:
+                identity, entry = future.result()
+            except Exception:
+                identity, entry = key[1:], {"rows": [], "error": "could not look up the agent's pull request", "at": self.clock()}
+            project.setdefault("pr_lookups", {})[identity] = entry
         self._poll_workspaces()
         self._poll_capture()
         self._poll_pr_details()
@@ -1488,7 +1562,7 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
                 "--limit",
                 str(LIST_LIMIT),
                 "--json",
-                "number,title,isDraft,reviewDecision,statusCheckRollup,headRefName,isCrossRepository,updatedAt",
+                GH_PR_FIELDS,
             ],
             env=self._gh_env(),
             timeout=LIST_TIMEOUT,

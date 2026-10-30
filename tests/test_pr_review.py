@@ -117,6 +117,7 @@ class ReviewFixture(AppFixture):
             12: [],
         }
         self.threads_fail = False
+        self.lookup_fail = False
         self.view_fail = False
         self.resolve_answer = None
         self.branch_head = "fm/other"
@@ -133,9 +134,11 @@ class ReviewFixture(AppFixture):
         if argv[:1] == ["gh"] and "list" in argv:
             name = argv[argv.index("-R") + 1].rsplit("/", 1)[1]
             listed = self.lists.get(name)
-            if listed is None:
+            if listed is None or (self.lookup_fail and "--head" in argv):
                 return CmdResult(1, "", "HTTP 502")
-            return CmdResult(0, json.dumps(listed))
+            if "--head" in argv:
+                listed = [item for item in listed if item["headRefName"] == argv[argv.index("--head") + 1]]
+            return CmdResult(0, json.dumps(listed[: int(argv[argv.index("--limit") + 1])]))
         if argv[:1] == ["gh"] and "view" in argv:
             if self.view_fail:
                 return CmdResult(1, "", "HTTP 502")
@@ -270,14 +273,71 @@ class AssociatedPullRequestTests(ReviewFixture):
         self.assertFalse(app.pr_diff_open)
         self.assertNotIn("SIDEBAR_LINE", text)
 
-    def test_a_truncated_open_list_is_not_reported_as_no_pull_request(self):
-        # Break: the agent's own PR lies beyond the fetched window and the page says there is none.
+    def crowded(self, *extra):
+        return [listed(100 + index, f"Other {index}", f"fm/other-{index}") for index in range(21)] + list(extra)
+
+    def test_the_agents_branch_pull_request_beyond_the_newest_twenty_is_found(self):
+        # Break: the agent's own PR is older than the capped project list and the page never shows it.
         self.branch_head = "fm/alpha-task"
-        self.lists["alpha"] = [listed(100 + index, f"Other {index}", f"fm/other-{index}") for index in range(21)]
+        self.lists["alpha"] = self.crowded(listed(9, "Agent branch work", "fm/alpha-task"))
         text = self.text(self.app())
-        self.assertIn("more open pull requests than were listed", text)
-        self.assertNotIn("no pull request for this branch", text)
+        self.assertIn("#9", text)
+        self.assertIn("Agent branch work", text)
         self.assertNotIn("Other 0", text)
+        heads = [call["argv"][call["argv"].index("--head") + 1] for call in self.gh_calls() if "--head" in call["argv"]]
+        self.assertEqual(heads, ["fm/alpha-task"])
+
+    def test_a_recorded_pull_request_beyond_the_newest_twenty_is_read_by_number(self):
+        # Break: a recorded task URL is ignored when its PR is outside the capped list, or every PR is scanned.
+        self.branch_head = "fm/no-such-branch"
+        write_meta(
+            self.home, "alpha-task", project=str(self.projects / "alpha"), herdr_session="lab",
+            herdr_workspace_id="w1", herdr_tab_id="w1:t1", herdr_pane_id="w1:p1", endpoint_task_id="alpha-task",
+            worktree=str(self.worktree), pr="https://github.com/acme/alpha/pull/7",
+        )
+        self.lists["alpha"] = self.crowded(listed(7, "Sidebar status", "fm/other"))
+        text = self.text(self.app())
+        self.assertIn("[ #7 \u00b7 Sidebar status ]", text)
+        views = [call["argv"] for call in self.gh_calls() if "view" in call["argv"] and "--json" in call["argv"] and "number,title,isDraft,reviewDecision" in call["argv"][call["argv"].index("--json") + 1]]
+        self.assertEqual([argv[argv.index("view") + 1] for argv in views], ["7"])
+
+    def test_a_crowded_repository_without_the_agents_pull_request_says_none_after_the_lookup(self):
+        # Break: the cut-off list keeps the page unknown forever, or shows one of the unrelated newest PRs.
+        self.branch_head = "fm/alpha-task"
+        self.lists["alpha"] = self.crowded()
+        text = self.text(self.app())
+        self.assertIn("no pull request for this branch", text)
+        self.assertNotIn("Other 0", text)
+
+    def test_a_failed_lookup_in_a_crowded_repository_stays_unknown(self):
+        # Break: a failed targeted lookup is reported as no pull request.
+        self.branch_head = "fm/alpha-task"
+        self.lists["alpha"] = self.crowded(listed(9, "Agent branch work", "fm/alpha-task"))
+        self.lookup_fail = True
+        text = self.text(self.app())
+        self.assertIn("could not look up the agent's pull request", text)
+        self.assertNotIn("no pull request for this branch", text)
+        self.assertNotIn("Agent branch work", text)
+
+    def test_a_crowded_fork_pull_request_on_the_same_branch_name_is_not_the_agents(self):
+        # Break: the targeted lookup accepts a contributor's fork PR with the agent's branch name.
+        self.branch_head = "fm/alpha-task"
+        self.lists["alpha"] = self.crowded(dict(listed(9, "Agent branch work", "fm/alpha-task"), isCrossRepository=True))
+        text = self.text(self.app())
+        self.assertIn("no pull request for this branch", text)
+        self.assertNotIn("Agent branch work", text)
+
+    def test_a_recorded_url_with_different_letter_case_is_the_same_repository(self):
+        # Break: a differently cased owner or repo in the recorded URL is treated as another repository.
+        self.branch_head = "fm/no-such-branch"
+        write_meta(
+            self.home, "alpha-task", project=str(self.projects / "alpha"), herdr_session="lab",
+            herdr_workspace_id="w1", herdr_tab_id="w1:t1", herdr_pane_id="w1:p1", endpoint_task_id="alpha-task",
+            worktree=str(self.worktree), pr="https://github.com/ACME/Alpha/pull/7",
+        )
+        text = self.text(self.app())
+        self.assertIn("[ #7 \u00b7 Sidebar status ]", text)
+        self.assertNotIn("another repository", text)
 
     def test_a_fork_pull_request_with_the_same_branch_name_is_not_the_agents(self):
         # Break: an unrelated contributor's fork PR on a same-named branch is shown as the agent's work.

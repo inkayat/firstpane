@@ -513,9 +513,16 @@ class PullRequestsMixin:
         return cached[1]
 
     def _row_slug(self, row):
-        return f"{row.get('host')}/{row.get('owner')}/{row.get('repo')}"
+        return f"{row.get('host')}/{row.get('owner')}/{row.get('repo')}".lower()
 
-    def _associated_pr(self):
+    def _lookup_identity(self, slug):
+        """(branch, recorded number) of the selected agent, each None when not known for this repository."""
+        branch_state, branch = self._branch_record()
+        recorded = self._recorded_pull(self.target)
+        number = recorded["number"] if recorded and recorded["slug"].lower() == slug.lower() else None
+        return (branch if branch_state == "known" else None, number)
+
+    def _associated_pr(self, lookups=True):
         """(kind, row or None, reason). kind is pr, absent, or unknown.
 
         Authority is the agent's branch record and a recorded task pull URL, both checked against
@@ -536,17 +543,20 @@ class PullRequestsMixin:
         if state == "error":
             return "unknown", None, project.get("pr_error") or "could not read pull requests"
         choice = project.get("choice")
-        slug = choice.slug if choice is not None and choice.slug else None
+        slug = choice.slug.lower() if choice is not None and choice.slug else None
         if state == "skipped" or not slug:
             reason = (choice.reason if choice is not None and choice.reason else None) or project.get("pr_reason") or "repository identity unknown"
             return "unknown", None, reason
-        rows = [row for row in project.get("pr_rows") or [] if self._row_slug(row) == slug]
+        identity = self._lookup_identity(slug)
+        lookup = (project.get("pr_lookups") or {}).get(identity) if lookups and project.get("truncated") else None
+        listed = list(project.get("pr_rows") or []) + list((lookup or {}).get("rows") or [])
+        rows = [row for row in listed if self._row_slug(row) == slug]
         branch_state, branch = self._branch_record()
         recorded = self._recorded_pull(target)
         recorded_pr = None
         recorded_note = None
         if recorded:
-            if recorded["slug"] != slug:
+            if recorded["slug"].lower() != slug:
                 recorded_note = "recorded pull request is in another repository"
             else:
                 recorded_pr = next((row for row in rows if row["number"] == recorded["number"]), None)
@@ -562,8 +572,8 @@ class PullRequestsMixin:
         chosen = branch_pr or recorded_pr
         if chosen is not None:
             return "pr", chosen, None
-        if project.get("truncated"):
-            return "unknown", None, "more open pull requests than were listed"
+        if project.get("truncated") and any(identity) and (lookup is None or lookup["error"]):
+            return "unknown", None, (lookup or {}).get("error") or "looking up the agent's pull request"
         if branch_state == "detached":
             return "absent", None, recorded_note or "no pull request for this detached checkout"
         return "absent", None, recorded_note or "no pull request for this branch"
