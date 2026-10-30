@@ -944,11 +944,19 @@ class BoardMixin:
                      {"kind": "board-composer", "part": "field", "send_at": 2 + box}))
         if tier >= 3:
             bound = self._verified_board_request() if card and self.board_view == "detail" else None
-            hint = (
-                "y queues this for FirstMate with the open request; it is not recorded as the answer"
-                if bound or (draft and any(item.get("kind") == "board-request" for item in draft.get("attachments") or []))
-                else "y queues this for FirstMate with the task context"
-            )
+            draft_mode = getattr(self, "message_delivery", None) == "input-draft"
+            if draft_mode:
+                hint = (
+                    "y pastes an unsent draft; it is not recorded as the answer"
+                    if bound or (draft and any(item.get("kind") == "board-request" for item in draft.get("attachments") or []))
+                    else "y pastes an unsent draft with the task context"
+                )
+            else:
+                hint = (
+                    "y queues this for FirstMate with the open request; it is not recorded as the answer"
+                    if bound or (draft and any(item.get("kind") == "board-request" for item in draft.get("attachments") or []))
+                    else "y queues this for FirstMate with the task context"
+                )
             if draft and draft.get("outcome"):
                 hint = f"last send: {draft['outcome']} \u00b7 " + hint
             rows.append((" " + _fg(clip(hint, self.cols - 2), MUTED, plain), {"kind": "board-composer", "part": "hint"}))

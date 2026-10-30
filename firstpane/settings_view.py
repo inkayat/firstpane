@@ -24,6 +24,16 @@ PLACEMENT_NOTES = {
     "ghostty": "a new tab in the Ghostty window in front (macOS)",
     "embedded": "the page drawn in this pane's Browser tab",
 }
+DELIVERIES = ("queue", "input-draft")
+DEFAULT_DELIVERY = "queue"
+DELIVERY_LABELS = {
+    "queue": "Queue for next check",
+    "input-draft": "Unsent draft in input box",
+}
+DELIVERY_NOTES = {
+    "queue": "confirmed text is queued; FirstMate picks it up at its next check. The input box is not touched",
+    "input-draft": "pasted into FirstMate's input box at once, even while it is working. Unsent; Enter is not pressed",
+}
 LABEL_WIDTH = max(len(label) for label in PLACEMENT_LABELS.values())
 
 
@@ -55,6 +65,7 @@ def migrate_ui_state(data, tabs):
 class SettingsMixin:
     def _init_settings(self):
         self.browser_placement = DEFAULT_PLACEMENT
+        self.message_delivery = DEFAULT_DELIVERY
         self.hidden_tabs = set()
         self._settings_shown()
 
@@ -64,6 +75,8 @@ class SettingsMixin:
             placement = "embedded"
         if placement in PLACEMENTS:
             self.browser_placement = placement
+        delivery = data.get("message_delivery")
+        self.message_delivery = delivery if delivery in DELIVERIES else DEFAULT_DELIVERY
         hidden = data.get("hidden_tabs")
         self.hidden_tabs = {name for name in hidden if name in TABS} if isinstance(hidden, list) else set()
         self._settings_shown()
@@ -83,13 +96,23 @@ class SettingsMixin:
         self.settings_cursor = PLACEMENTS.index(self.browser_placement)
 
     def _settings_items(self):
-        """What the cursor walks: the placement choices, then one row per tab."""
-        return [("placement", value) for value in PLACEMENTS] + [("tab", name) for name in TABS]
+        """What the cursor walks: placement, message transport, then one row per tab."""
+        return (
+            [("placement", value) for value in PLACEMENTS]
+            + [("delivery", value) for value in DELIVERIES]
+            + [("tab", name) for name in TABS]
+        )
 
     def _choose_placement(self, value):
         self.browser_placement = value
         self.settings_cursor = PLACEMENTS.index(value)
         self.status = f"Browser placement saved: {PLACEMENT_LABELS[value]}"
+        self._save_ui()
+
+    def _choose_delivery(self, value):
+        self.message_delivery = value
+        self.settings_cursor = len(PLACEMENTS) + DELIVERIES.index(value)
+        self.status = f"Messages to FirstMate: {DELIVERY_LABELS[value]}"
         self._save_ui()
 
     def _toggle_tab(self, name):
@@ -125,11 +148,24 @@ class SettingsMixin:
                 lines.append((" " + paint(fit(head, self.cols - 1), style, plain), hit))
                 lines += [(text, hit) for text, _ in prose(note, indent=7)]
         lines.append(("", None))
+        lines.append((" " + paint("Messages to FirstMate", rgb_fg(BRIGHT, bold=True), plain), None))
+        lines += prose("One way a confirmed message is delivered. The other is not used")
+        lines.append(("", None))
+        for index, value in enumerate(DELIVERIES, start=len(PLACEMENTS)):
+            hit = {"kind": "setting-delivery", "value": value}
+            cursor = index == self.settings_cursor
+            mark = "(\u2022)" if value == self.message_delivery else "( )"
+            head = f"{'>' if cursor else ' '} {mark} {DELIVERY_LABELS[value]}"
+            style = (rgb_bg(SELECTED_BG) + ";" if cursor else "") + rgb_fg(INK, bold=value == self.message_delivery)
+            cursor_line = len(lines) if cursor else cursor_line
+            lines.append((" " + paint(fit(head, self.cols - 1), style, plain), hit))
+            lines += [(text, hit) for text, _ in prose(DELIVERY_NOTES[value], indent=7)]
+        lines.append(("", None))
         lines.append((" " + paint("Tabs", rgb_fg(BRIGHT, bold=True), plain), None))
         lines += prose("Show or hide tabs in the tab row. The number keys open the shown tabs, counted from 1; "
                        "a hidden tab keeps its data. Settings stays in the header")
         lines.append(("", None))
-        for index, name in enumerate(TABS, start=len(PLACEMENTS)):
+        for index, name in enumerate(TABS, start=len(PLACEMENTS) + len(DELIVERIES)):
             hit = {"kind": "setting-tab", "value": name}
             cursor = index == self.settings_cursor
             shown = name not in self.hidden_tabs
@@ -155,11 +191,15 @@ class SettingsMixin:
             kind, value = items[self.settings_cursor]
             if kind == "placement":
                 self._choose_placement(value)
+            elif kind == "delivery":
+                self._choose_delivery(value)
             else:
                 self._toggle_tab(value)
 
     def _settings_mouse(self, hit):
         if hit["kind"] == "setting-tab":
             self._toggle_tab(hit["value"])
+        elif hit["kind"] == "setting-delivery" and hit.get("value") in DELIVERIES:
+            self._choose_delivery(hit["value"])
         elif hit.get("value") in PLACEMENTS:
             self._choose_placement(hit["value"])

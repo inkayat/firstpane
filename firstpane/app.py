@@ -2,7 +2,8 @@
 
 Layout: a tab row (Agents, Review, Board, Terminal, Browser) and a header Settings control.
 Review shows the selected agent's workspace or a pull request. Messages to FirstMate are written
-inline and queued with `fm-inbox.sh`. The Terminal tab is a new empty shell in the selected agent's directory.
+inline and delivered by the Settings choice (the durable queue, or an unsent paste into the input box).
+The Terminal tab is a new empty shell in the selected agent's directory.
 """
 
 import json
@@ -338,7 +339,7 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
         if gesture != "press":
             return
         self.changes_menu = None
-        if self.settings_open and kind in ("setting-choice", "setting-tab"):
+        if self.settings_open and kind in ("setting-choice", "setting-tab", "setting-delivery"):
             self._settings_mouse(hit)
             return
         if self.tab == "board" and kind in ("board-filter", "board-done", "board-agent", "board-row", "board-card", "board-stop", "board-composer", "board-back", "board-review"):
@@ -1826,10 +1827,16 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
         self.status = "comment outcome: posted"
 
     def _arm_note(self, row):
-        reason = self._note_block_reason()
-        if reason:
-            self.status = reason
-            return
+        mode = self.message_delivery if getattr(self, "message_delivery", None) == "input-draft" else "queue"
+        if mode == "input-draft":
+            if not self.config.firstmate_home:
+                self.status = "FirstMate not configured"
+                return
+        else:
+            reason = self._note_block_reason()
+            if reason:
+                self.status = reason
+                return
         pr = self._selected_pr(row)
         if not pr:
             self.status = "select a pull request first"
@@ -1847,7 +1854,7 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
         self._write_draft(draft)
         project = self._project(pr["project_key"])
         label = project["label"] if project else pr["project_key"]
-        self.pending = {"draft_id": draft["id"], "pr": pr, "body": body, "label": label}
+        self.pending = {"draft_id": draft["id"], "pr": pr, "body": body, "label": label, "delivery": mode}
         self.screen = "confirm-note"
 
     def _confirm_note(self, plain):
@@ -1855,6 +1862,14 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
         pr = pending.get("pr") or {}
         url = f"https://{pr.get('host')}/{pr.get('owner')}/{pr.get('repo')}/pull/{pr.get('number')}"
         composed = self._note_text(url, pr, pending.get("label") or "", pending.get("body") or "")
+        if pending.get("delivery") == "input-draft":
+            return (
+                f"Paste this note into FirstMate's input box at {self.config.firstmate_home} as an unsent draft. Enter is not pressed.\n"
+                "---\n"
+                f"{composed}\n"
+                "---\n"
+                "y pastes it now, any other key keeps the draft"
+            )
         return (
             f"Queue note to FirstMate at {self.config.firstmate_home}\n"
             "---\n"
@@ -1873,15 +1888,24 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
         pending = self.pending or {}
         draft = self._read_draft(pending.get("draft_id"))
         pr = pending.get("pr") or {}
+        delivery = pending.get("delivery")
         self.screen = "tree"
         self.pending = None
-        reason = self._note_block_reason()
-        if reason or not draft or not pr:
-            self.status = reason or "note outcome: not-saved"
-            return
+        if delivery == "input-draft":
+            if not self.config.firstmate_home or not draft or not pr:
+                self.status = "FirstMate not configured" if not self.config.firstmate_home else "note outcome: not-saved"
+                return
+        else:
+            reason = self._note_block_reason()
+            if reason or not draft or not pr:
+                self.status = reason or "note outcome: not-saved"
+                return
         url = f"https://{pr['host']}/{pr['owner']}/{pr['repo']}/pull/{pr['number']}"
         user_text = sanitize(draft.get("body") or "")
         stdin = self._note_text(url, pr, pending.get("label") or "", user_text)
+        if delivery == "input-draft":
+            self._finish_paste(draft, stdin, write=self._write_draft)
+            return
         script = str(Path(self.config.firstmate_root) / "bin" / "fm-inbox.sh")
         result = self.transport.run(
             [script, "note", "--request-id", draft["request_id"], "--json", "-"],
@@ -1891,6 +1915,33 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
             cwd=str(self.state_dir),
         )
         self._apply_note_result(draft, result)
+
+    def _finish_paste(self, draft, body, write):
+        """Paste `body` as an unsent draft. Never queues and never presses Enter."""
+        from firstpane.inputdraft import InputDraft
+
+        copier = InputDraft(self.transport, self.config.firstmate_home)
+        target, refusal = copier.locate()
+        if refusal:
+            self.status = f"not pasted: {refusal}; the draft stays here"
+            return
+        outcome, detail = copier.transfer(target, body)
+        if outcome == "refused":
+            self.status = f"not pasted: {detail}; the draft stays here"
+            return
+        draft["sent_body"] = body
+        if outcome == "transferred":
+            draft["outcome"] = "transferred"
+            draft["finished_at"] = self.clock()
+            if write(draft) is False:
+                self.drafts.archive(draft)
+            self.status = "pasted into FirstMate's input box; not sent"
+            if draft is self.draft:
+                self._drop_inline()
+            return
+        draft["outcome"] = "unconfirmed"
+        write(draft)
+        self.status = detail
 
     def _apply_note_result(self, draft, result):
         outcome, note_id = note_outcome(result)
@@ -2134,6 +2185,7 @@ class App(AgentsMixin, BoardMixin, ComposerMixin, ChangesMixin, BrowserTabMixin,
             "board_selected": self.board_selected,
             "board_done_open": self.board_done_open,
             "browser_placement": self.browser_placement,
+            "message_delivery": self.message_delivery,
             "hidden_tabs": [name for name in TABS if name in self.hidden_tabs],
         }
         temp = path.with_name(f".ui-state.{os.getpid()}.tmp")
