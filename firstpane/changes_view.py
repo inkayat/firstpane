@@ -662,12 +662,7 @@ class ChangesMixin:
             self.review_menu = None
             return
         if getattr(self.config, "review", None) is None:
-            self.status = (
-                "Code review is not set up. Firstpane does not review by itself and has no bundled runner. "
-                "In config.json set review.command to an argument list and review.skills to absolute skill "
-                "directories outside the repository. The command reads one firstpane.review.request.v1 JSON "
-                "document on stdin and writes one firstpane.review.result.v1 document on stdout."
-            )
+            self.status = "Code review: set review.command in config.json (see README)"
             return
         self.changes_menu = None
         self.pr_menu = None
