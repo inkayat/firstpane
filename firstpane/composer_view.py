@@ -5,8 +5,8 @@ The Agents field's draft is keyed by the agent alone. An inline message is opene
 range (Changes tab), a captured browser selection (Browser tab) or a pull request conversation
 (Pull Requests tab) and its editor is drawn right under it. Its draft is keyed by the selected
 agent and the selection itself, so it never moves to another agent, file, range or
-conversation; sending is one exact preview, then the message is queued for FirstMate with
-`fm-inbox.sh note`, to be picked up at its next check.
+conversation; sending is one exact preview, then the Settings choice either queues the message
+for FirstMate with `fm-inbox.sh note` or pastes it into the input box as an unsent draft.
 """
 
 import hashlib
@@ -440,22 +440,31 @@ class ComposerMixin:
         if refusal:
             self.status = refusal
             return
-        reason = self._note_block_reason() if hasattr(self, "_note_block_reason") else "FirstMate not configured"
+        mode = self.message_delivery if getattr(self, "message_delivery", None) == "input-draft" else "queue"
+        reason = None if mode == "input-draft" and self.config.firstmate_home else (
+            self._note_block_reason() if hasattr(self, "_note_block_reason") else "FirstMate not configured"
+        )
+        if mode == "input-draft" and not self.config.firstmate_home:
+            reason = "FirstMate not configured"
         if reason:
-            self.status = f"not queued: {reason}; the draft stays here"
+            self.status = f"{'not pasted' if mode == 'input-draft' else 'not queued'}: {reason}; the draft stays here"
             return
         self._refresh_target_now()
         body, warnings = build_message(self._message_context(), self.composer.text, self.draft.get("attachments"))
         self.pending = {"draft_id": self.draft["id"], "body": body, "warnings": warnings + self._drift_warnings(),
-                        "request_id": self.draft.get("request_id")}
+                        "request_id": self.draft.get("request_id"), "delivery": mode}
         self.screen = "confirm-send"
 
     def _confirm_send(self, plain):
         pending = self.pending or {}
-        lines = ["Queue this for FirstMate. It is not processed yet and does not touch FirstMate's message box."]
+        if pending.get("delivery") == "input-draft":
+            lines = ["Paste this into FirstMate's input box as an unsent draft. Enter is not pressed, and FirstMate does not need to be idle."]
+            action = "y pastes it now, any other key keeps the draft"
+        else:
+            lines = ["Queue this for FirstMate. It is not processed yet and does not touch FirstMate's message box."]
+            action = "y queues it for FirstMate's next check, any other key keeps the draft"
         lines.extend(paint("! " + warning, "1;33", plain) for warning in pending.get("warnings") or [])
-        lines.extend(["---", pending.get("body", "").rstrip("\n"), "---",
-                      "y queues it for FirstMate's next check, any other key keeps the draft"])
+        lines.extend(["---", pending.get("body", "").rstrip("\n"), "---", action])
         return "\n".join(lines)
 
     def _send_message(self):
@@ -471,11 +480,15 @@ class ComposerMixin:
             self.pending = None
             self.status = refusal
             return
-        reason = self._note_block_reason() if hasattr(self, "_note_block_reason") else "FirstMate not configured"
+        delivery = pending.get("delivery") if pending.get("delivery") in ("queue", "input-draft") else "queue"
+        if delivery == "input-draft":
+            reason = None if self.config.firstmate_home else "FirstMate not configured"
+        else:
+            reason = self._note_block_reason() if hasattr(self, "_note_block_reason") else "FirstMate not configured"
         if reason:
             self.screen = "tree"
             self.pending = None
-            self.status = f"not queued: {reason}; the draft stays here"
+            self.status = f"{'not pasted' if delivery == 'input-draft' else 'not queued'}: {reason}; the draft stays here"
             return
         self._refresh_target_now()
         body, warnings = build_message(self._message_context(), self.composer.text, self.draft.get("attachments"))
@@ -485,13 +498,16 @@ class ComposerMixin:
                                 warnings=["the message changed since the preview; this is the updated text"] + warnings)
             return
         request_id = self.draft.get("request_id") or pending.get("request_id")
-        if not request_id:
+        if delivery != "input-draft" and not request_id:
             self.screen = "tree"
             self.pending = None
             self.status = "not queued: the draft has no request id; the draft stays here"
             return
         self.screen = "tree"
         self.pending = None
+        if delivery == "input-draft":
+            self._finish_paste(self.draft, body, write=self.drafts.save)
+            return
         script = str(Path(self.config.firstmate_root) / "bin" / "fm-inbox.sh")
         result = self.transport.run(
             [script, "note", "--request-id", request_id, "--json", "-"],
@@ -582,7 +598,12 @@ class ComposerMixin:
             rows.append((text, {"kind": "context-footer", "part": "chip", "dismiss": 1 + width(shown)}))
         placeholder = "Select lines to write to FirstMate" if self._on("changes") else "Add a conversation or select diff lines to write to FirstMate"
         rows.append(self._footer_field(draft, placeholder, plain))
-        hint = "Enter previews; y queues it for FirstMate" if draft else "Enter on a selection adds it here"
+        if draft and getattr(self, "message_delivery", None) == "input-draft":
+            hint = "Enter previews; y pastes an unsent draft"
+        elif draft:
+            hint = "Enter previews; y queues it for FirstMate"
+        else:
+            hint = "Enter on a selection adds it here"
         if draft and draft.get("outcome"):
             hint = f"last send: {draft['outcome']} \u00b7 " + hint
         rows.append((" " + paint(hint, rgb_fg(MUTED), plain), {"kind": "context-footer", "part": "hint"}))
@@ -691,7 +712,8 @@ class ComposerMixin:
             rows.extend((lead + paint("> " + line, rgb_fg(MUTED), plain), hit) for line in excerpt[:EXCERPT_ROWS] if line)
         avail = max(4, self.cols - indent - 4)
         rows.extend((lead + line, hit) for line in self._editor_lines(plain, avail))
-        rows.append((lead + paint("Enter previews for FirstMate's queue · Esc keeps the draft", rgb_fg(MUTED), plain), hit))
+        preview = "Enter previews an unsent draft · Esc keeps the draft" if getattr(self, "message_delivery", None) == "input-draft" else "Enter previews for FirstMate's queue · Esc keeps the draft"
+        rows.append((lead + paint(preview, rgb_fg(MUTED), plain), hit))
         return rows
 
     def _editor_lines(self, plain, avail):

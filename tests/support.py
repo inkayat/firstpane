@@ -386,6 +386,8 @@ class FakePi:
             return "\n".join(top + [RULE, "", self.dialog, "", RULE, "", ""])
         body = self.text.split("\n") if (self.text and self.render) else [""]
         top_border = RULE
+        if self.pane.get("agent_status") == "working":
+            top_border = "── ⠋ Working " + "─" * 20
         if self.rows and len(body) > self.rows:
             hidden = len(body) - self.rows
             body = body[hidden:]
