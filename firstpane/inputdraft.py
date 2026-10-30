@@ -107,7 +107,8 @@ def _shows_append(box, before, pasted):
         match = MARKER.search(visible)
         prefix = visible[: match.start()]
         got = f"+{match.group(1)} lines" if match.group(1) else f"{match.group(2)} chars"
-        return prefix == before and got == kind
+        # A screen read strips a trailing space from `before`; the text before the marker keeps it.
+        return prefix.rstrip(" ") == before and got == kind
     kept = _pi_kept(pasted)
     expected = before + kept
     # A screen read strips a space that was at the end of the previous line.

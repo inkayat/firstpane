@@ -167,6 +167,18 @@ class InputDraftTests(unittest.TestCase):
         self.assertEqual(self.main.text, "[paste #1 +11 lines]")
         self.assertEqual(self.main.submitted, [])
 
+    def test_a_collapsed_paste_after_text_ending_in_a_space_is_confirmed(self):
+        # Break: pi's screen read strips the trailing space of the existing text, so a visible
+        # collapsed paste (over ten lines, or over 1000 chars) is reported unconfirmed.
+        for body, marker in ((LONG, "[paste #1 +11 lines]"), ("x" * 1001, "[paste #1 1001 chars]")):
+            with self.subTest(marker=marker):
+                self.main.text, self.main.pastes, self.main.received = "typed earlier ", 0, []
+                outcome, detail = self.transfer(body)
+                self.assertEqual(outcome, "transferred", detail)
+                self.assertEqual(self.main.text, "typed earlier " + marker)
+                self.assertEqual(self.main.received, ["\x1b[200~" + body.rstrip("\n") + "\x1b[201~"])
+                self.assertEqual(self.main.submitted, [])
+
     def test_only_pane_send_text_is_used(self):
         # Break: the copy focuses the pane, sends keys, or submits through agent.prompt.
         self.main.text = ""
